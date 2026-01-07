@@ -1,0 +1,11 @@
+{
+    "test_key": "test_value",
+    "user_settings": {
+        "selected_codes": [
+            "300347"
+        ],
+        "holdings": {
+            "泰格医药": 1000
+        }
+    }
+}
