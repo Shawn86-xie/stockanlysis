@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.graph_objects as go
@@ -7,14 +8,15 @@ import plotly.express as px
 from datetime import datetime
 
 # 导入自定义模块
-from config import load_config, save_config
-from data_fetcher import fetch_stock_data, get_signals, compute_portfolio_stats, monte_carlo_simulation, get_recent_10_days, analyze_portfolio
+from config import load_config, save_config, save_trade, delete_trade, clear_portfolio
+from data_fetcher import fetch_stock_data, get_signals, compute_portfolio_stats, monte_carlo_simulation, get_recent_10_days, analyze_portfolio, get_portfolio_summary, calculate_deviation
 from ai_analyzer import deepseek_analyze
+from backtester import generate_signal_series, run_vectorized_backtest, plot_backtest_results, plot_backtest_with_divergence, rsi_grid_search, grid_search_with_backtest, detect_rsi_divergence, plot_divergence_chart, calculate_rsi
 
 # --- 环境与中文字体配置 ---
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
-st.set_page_config(page_title="2026 医疗量化看板-模块化版", layout="wide")
+st.set_page_config(page_title="2026 量化决策看板", layout="wide")
 
 # --- 加载配置 ---
 config = load_config()
@@ -46,6 +48,14 @@ if 'master_pool' not in st.session_state:
 # --- 加载用户保存的选择和持仓 ---
 if 'user_settings' not in st.session_state:
     st.session_state.user_settings = config.get('user_settings', {})
+    
+# 自动加载保存的标的勾选状态
+if st.session_state.user_settings:
+    saved_codes = st.session_state.user_settings.get('selected_codes', [])
+    # 恢复选择状态
+    for cat, stocks in st.session_state.master_pool.items():
+        for c, n in stocks.items():
+            st.session_state[f"sel_{c}"] = c in saved_codes
 
 # --- Streamlit 侧边栏 ---
 st.sidebar.title("🤖 决策中心 (2026)")
@@ -119,7 +129,7 @@ with st.sidebar.expander("📚 标的库管理", expanded=False):
     for cat, stocks in list(st.session_state.master_pool.items()):
         st.write(f"**{cat}**")
         for c, n in list(stocks.items()):
-            if st.button(f"🗑️ 删除 {n} ({c})", key=f"del_{c}", use_container_width=True):
+            if st.button(f"🗑️ 删除 {n} ({c})", key=f"del_{cat}_{c}", width='content'):
                 del st.session_state.master_pool[cat][c]
                 # 如果分类为空，删除分类
                 if not st.session_state.master_pool[cat]:
@@ -135,6 +145,98 @@ with st.sidebar.expander("📚 标的库管理", expanded=False):
         st.success("标的库已保存到配置文件！")
         st.info("应用将重新加载以使用新的标的库...")
         st.rerun()
+
+st.sidebar.markdown("---")
+
+# --- 交易录入界面 ---
+with st.sidebar.expander("📝 录入新交易", expanded=False):
+    st.subheader("录入新交易")
+    
+    # 从现有标的库中选择股票
+    all_stocks = []
+    for cat, stocks in st.session_state.master_pool.items():
+        for code, name in stocks.items():
+            all_stocks.append({"code": code, "name": name, "category": cat})
+    
+    if all_stocks:
+        # 创建选择列表
+        stock_options = [f"{item['code']} - {item['name']} ({item['category']})" for item in all_stocks]
+        selected_option = st.selectbox("选择标的", options=stock_options, key="trade_stock_select")
+        
+        if selected_option:
+            # 解析选择的股票
+            parts = selected_option.split(" - ")
+            code = parts[0]
+            name = parts[1].split(" (")[0]
+            
+            # 显示已选择的信息
+            st.info(f"已选择: {name} ({code})")
+            
+            col_price, col_qty = st.columns(2)
+            with col_price:
+                buy_price = st.number_input("买入均价 (元)", min_value=0.01, value=100.0, step=0.01, key="buy_price")
+            with col_qty:
+                quantity = st.number_input("买入数量 (股)", min_value=1, value=100, step=100, key="quantity")
+            
+            col_date, col_time = st.columns(2)
+            with col_date:
+                buy_date = st.date_input("买入日期", value=datetime.now(), key="buy_date")
+            with col_time:
+                # 时间戳使用当前时间
+                timestamp = int(datetime.now().timestamp())
+                st.text(f"时间戳: {timestamp}")
+            
+            if st.button("💾 保存交易记录", type="primary", use_container_width=True):
+                # 数据完整性检查
+                if buy_price <= 0:
+                    st.error("买入均价必须大于0")
+                elif quantity <= 0:
+                    st.error("买入数量必须大于0")
+                else:
+                    trade_data = {
+                        "code": code,
+                        "name": name,
+                        "buy_price": float(buy_price),
+                        "quantity": int(quantity),
+                        "buy_date": buy_date.strftime("%Y-%m-%d"),
+                        "timestamp": timestamp
+                    }
+                    
+                    # 保存交易记录
+                    config = load_config()  # 重新加载最新配置
+                    config = save_trade(config, trade_data)
+                    st.success("交易记录已保存！")
+                    # 更新session_state中的portfolio
+                    if 'portfolio' not in st.session_state:
+                        st.session_state.portfolio = []
+                    st.session_state.portfolio = config.get('portfolio', [])
+    
+    # 显示当前持仓记录
+    st.subheader("当前持仓记录")
+    config = load_config()
+    portfolio = config.get('portfolio', [])
+    
+    if portfolio:
+        for idx, trade in enumerate(portfolio):
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                st.text(f"{trade['name']} ({trade['code']})")
+                st.caption(f"{trade['quantity']}股 @ {trade['buy_price']}元")
+            with col2:
+                st.caption(trade['buy_date'])
+            with col3:
+                if st.button("🗑️", key=f"del_trade_{idx}", help="删除此记录"):
+                    config = delete_trade(config, idx)
+                    st.success("记录已删除")
+                    st.rerun()
+        
+        # 一键清空按钮
+        if st.button("⚠️ 一键清空持仓", type="secondary", use_container_width=True):
+            config = clear_portfolio(config)
+            st.success("持仓记录已清空")
+            st.rerun()
+    else:
+        st.info("暂无持仓记录")
 
 st.sidebar.markdown("---")
 
@@ -171,10 +273,14 @@ with col_save:
             'sim_num': sim_num
         }
         
-        # 更新全局配置并保存到文件
-        config['user_settings'] = st.session_state.user_settings
-        save_config(config)
-        st.sidebar.success("设置已保存！")
+    # 保存DeepSeek密钥到配置
+    if ds_key:
+        config['deepseek_api_key'] = ds_key
+    
+    # 更新全局配置并保存到文件
+    config['user_settings'] = st.session_state.user_settings
+    save_config(config)
+    st.sidebar.success("设置已保存！")
 
 with col_load:
     if st.button("📂 加载保存的设置", use_container_width=True):
@@ -225,7 +331,7 @@ if not final_sel and st.session_state.get('run_analysis', False):
     st.session_state.selected_stocks = {}
 
 # --- 主界面 ---
-st.title("🏥 医疗量化研报系统 (模块化版)")
+st.title("🏥 量化研报系统 V1.0 20260108")
 st.caption(f"科研工作者专属调仓决策工具 | 当前配置生效日期: {datetime.now().strftime('%Y-%m-%d')}")
 
 # 检查是否应该运行分析
@@ -236,6 +342,21 @@ if should_run_analysis and analysis_stocks:
     # 获取数据
     data = fetch_stock_data(list(analysis_stocks.keys()), list(analysis_stocks.values()))
     if not data.empty:
+        # 检查实际获取到的股票数据，更新analysis_stocks
+        actual_stocks = {}
+        for code, name in analysis_stocks.items():
+            if name in data.columns:
+                actual_stocks[code] = name
+            else:
+                st.warning(f"股票 {name}({code}) 数据获取失败，已从分析中排除。")
+        # 如果没有成功获取到任何股票，则报错并停止
+        if len(actual_stocks) == 0:
+            st.error("未能获取到任何股票数据，请检查网络连接或股票代码。")
+            st.stop()
+        # 更新analysis_stocks为实际获取到的股票
+        analysis_stocks = actual_stocks
+        # 确保data只包含actual_stocks中的股票（实际上已经如此，但为了安全）
+        data = data[list(actual_stocks.values())]
         # 计算收益率
         returns = data.pct_change().dropna()
         # 投资组合统计
@@ -245,10 +366,10 @@ if should_run_analysis and analysis_stocks:
         best_p = sim_res.iloc[sim_res['Sharpe'].idxmax()]
 
         # 功能标签页
-        t1, t2, t3, t4, t5 = st.tabs(["💡 AI 资讯深度研判", "🚦 买卖与风险预警", "🕸️ 板块相关性分析", "📊 权重优化实验", "📈 模拟交易"])
+        t1, t2, t3, t4, t5, t6 = st.tabs(["💡 AI 资讯深度研判", "🚦 买卖与风险预警", "🕸️ 板块相关性分析", "📊 权重优化实验", "📈 模拟交易", "📈 实盘持仓监测"])
 
         with t1:
-            st.subheader("DeepSeek 医疗专业资讯评分")
+            st.subheader("DeepSeek专业资讯评分")
             st.info("AI资讯分析需要调用外部API，耗时较长，请手动点击按钮获取。")
             
             # 初始化session_state存储新闻和分析结果
@@ -264,13 +385,18 @@ if should_run_analysis and analysis_stocks:
                             news = ak.stock_news_em(symbol=c).head(2)
                             news_list = []
                             for _, row in news.iterrows():
-                                stars, nature, color, reason = deepseek_analyze(ds_key, row['新闻标题'], n)
+                                # 获取发布日期（假设列名为'新闻发布时间'，如果没有则使用None）
+                                publish_date = row.get('新闻发布时间')
+                                # 调用更新后的deepseek_analyze函数，返回字典
+                                analysis_result = deepseek_analyze(ds_key, row['新闻标题'], n, publish_date)
                                 news_list.append({
                                     'title': row['新闻标题'],
-                                    'stars': stars,
-                                    'nature': nature,
-                                    'color': color,
-                                    'reason': reason,
+                                    'stars': analysis_result['stars'],
+                                    'nature': analysis_result['nature'],
+                                    'color': analysis_result['color'],
+                                    'reason': analysis_result['reason'],
+                                    'summary': analysis_result['summary'],
+                                    'date': analysis_result['date'],
                                     'url': row.get('文章链接', '')
                                 })
                             st.session_state.news_results[c] = {
@@ -281,15 +407,22 @@ if should_run_analysis and analysis_stocks:
                             st.error(f"获取 {n} 的新闻失败：{e}")
             
             # 显示已存储的结果
-            for c, data in st.session_state.news_results.items():
-                if data['name'] in analysis_stocks.values():  # 只显示当前选中的标的
-                    with st.expander(f"📌 {data['name']} ({c}) - 资讯洞察"):
-                        for item in data['news']:
-                            c_a, c_b = st.columns([4, 2])
-                            c_a.write(f"**{item['title']}**")
-                            c_b.markdown(f":{item['color']}[{item['stars']}] *{item['reason']}*")
-                            if item['url']:
-                                c_a.caption(f"[原文链接]({item['url']})")
+            for c, news_entry in st.session_state.news_results.items():
+                if news_entry['name'] in analysis_stocks.values():  # 只显示当前选中的标的
+                    with st.expander(f"📌 {news_entry['name']} ({c}) - 资讯洞察"):
+                        for item in news_entry['news']:
+                            # 使用两列布局：左侧标题和摘要，右侧评分和日期
+                            col_left, col_right = st.columns([3, 1])
+                            with col_left:
+                                st.markdown(f"#### {item['title']}")
+                                st.caption(f"**发布日期**: {item['date']}")
+                                st.write(f"**摘要**: {item['summary']}")
+                                st.write(f"**分析**: {item['reason']}")
+                                if item['url']:
+                                    st.caption(f"[原文链接]({item['url']})")
+                            with col_right:
+                                st.markdown(f":{item['color']}[{item['stars']}]")
+                                st.caption(f"**性质**: {item['nature']}")
 
         with t2:
             st.subheader("量化决策与风险管理")
@@ -304,52 +437,408 @@ if should_run_analysis and analysis_stocks:
             - **最优配比**：AI推荐的最优投资组合权重
             """)
             sig_df = get_signals(data, best_p[list(analysis_stocks.values())].to_dict(), stop_loss_val)
-            # 对触及止损的行进行高亮
-            def highlight_risk(val):
-                color = 'red' if '‼️' in str(val) else 'black'
-                return f'color: {color}'
-            st.table(sig_df.style.map(highlight_risk, subset=['风险']))
+            # 检查信号数据是否为空
+            if sig_df.empty:
+                st.warning("未能生成交易信号，可能是数据获取失败或计算错误。")
+            else:
+                # 对触及止损的行进行高亮，使用高对比度颜色
+                def highlight_risk(val):
+                    if '‼️' in str(val):
+                        # 警示文本使用红色，加粗提高可见性
+                        return 'color: #ff4444; font-weight: bold'
+                    else:
+                        # 普通文本使用白色，确保在深色背景下可见
+                        return 'color: #ffffff'
+                
+                # 检查'风险'列是否存在
+                if '风险' in sig_df.columns:
+                    st.table(sig_df.style.map(highlight_risk, subset=['风险']))
+                else:
+                    st.table(sig_df)
             
-            # 添加下拉选择器用于突出显示曲线
-            stock_names = list(analysis_stocks.values())
-            if 'highlighted_stock' not in st.session_state:
-                st.session_state.highlighted_stock = stock_names[0] if stock_names else None
+            # 初始化回测参数
+            if 'backtest_days' not in st.session_state:
+                st.session_state.backtest_days = 250
+            if 'backtest_initial_capital' not in st.session_state:
+                st.session_state.backtest_initial_capital = 100000
+            if 'backtest_rsi_buy' not in st.session_state:
+                st.session_state.backtest_rsi_buy = 35.0
+            if 'backtest_rsi_sell' not in st.session_state:
+                st.session_state.backtest_rsi_sell = 75.0
+            if 'backtest_results' not in st.session_state:
+                st.session_state.backtest_results = {}
             
-            # 使用下拉选择器更新选中的股票
-            highlighted = st.selectbox(
-                "选择要突出显示的股票（或点击图例隐藏/显示）",
-                options=stock_names,
-                index=stock_names.index(st.session_state.highlighted_stock) if st.session_state.highlighted_stock in stock_names else 0,
-                key='highlight_select'
-            )
-            st.session_state.highlighted_stock = highlighted
-            
-            # 创建Plotly图表
+            # 准备交互式图表的数据
             cum_returns = (1 + returns).cumprod()
-            fig = go.Figure()
-            for name in cum_returns.columns:
-                line_width = 3 if name == highlighted else 1
-                line_opacity = 1.0 if name == highlighted else 0.5
-                fig.add_trace(go.Scatter(
-                    x=cum_returns.index,
-                    y=cum_returns[name],
-                    name=name,
-                    line=dict(width=line_width),
-                    opacity=line_opacity,
-                ))
-            fig.update_layout(
-                title="累积收益率曲线",
-                xaxis_title="日期",
-                yaxis_title="累积收益率",
-                hovermode="x unified",
-                showlegend=True,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            stock_names = list(analysis_stocks.values())
+            
+            # 使用@st.fragment实现局部渲染，避免整体刷新
+            @st.fragment
+            def render_interactive_plot(cum_returns, stock_names):
+                # 此函数内部的交互，不会触发主脚本的 Rerun
+                highlighted = st.selectbox(
+                    "选择要突出显示的股票（或点击图例隐藏/显示）",
+                    options=stock_names,
+                    key='chart_highlight_select'
+                )
+                
+                fig = go.Figure()
+                for name in cum_returns.columns:
+                    line_width = 4 if name == highlighted else 1.5
+                    line_opacity = 1.0 if name == highlighted else 0.4
+                    fig.add_trace(go.Scatter(
+                        x=cum_returns.index,
+                        y=cum_returns[name],
+                        name=name,
+                        line=dict(width=line_width),
+                        opacity=line_opacity,
+                    ))
+                
+                fig.update_layout(
+                    title=f"累积收益率曲线 (当前高亮: {highlighted})",
+                    xaxis_title="日期",
+                    yaxis_title="累积收益率",
+                    hovermode="x unified",
+                    showlegend=True,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # 调用局部片段，实现“无刷新”切换
+            render_interactive_plot(cum_returns, stock_names)
             
             # 显示最近10个交易日价格数据
             st.subheader("📅 最近10个交易日价格")
             recent_data = get_recent_10_days(data)
-            st.dataframe(recent_data.style.format("{:.2f}"))
+            # 仅对数值列应用格式化，避免字符串列格式化错误
+            numeric_cols = recent_data.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                st.dataframe(recent_data.style.format("{:.2f}", subset=numeric_cols))
+            else:
+                st.dataframe(recent_data)
+            
+            # 回测功能
+            st.subheader("📊 历史回测引擎（验证策略有效性）")
+            st.caption("选择一只股票，基于RSI和移动平均线策略进行历史回测，验证策略在历史数据上的表现。")
+            
+            # 选择要回测的股票
+            if len(stock_names) > 0:
+                backtest_stock = st.selectbox("选择要回测的股票", options=stock_names, key="backtest_stock_select")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    backtest_days = st.number_input("回测历史天数", min_value=60, max_value=1000, 
+                                                   value=st.session_state.backtest_days, step=10, key="backtest_days_input")
+                with col2:
+                    initial_capital = st.number_input("初始资金（元）", min_value=10000, max_value=1000000,
+                                                     value=st.session_state.backtest_initial_capital, step=10000, key="initial_capital_input")
+                with col3:
+                    rsi_buy = st.slider("RSI买入阈值", min_value=10.0, max_value=50.0, value=st.session_state.backtest_rsi_buy, step=1.0)
+                with col4:
+                    rsi_sell = st.slider("RSI卖出阈值", min_value=50.0, max_value=90.0, value=st.session_state.backtest_rsi_sell, step=1.0)
+                
+                if st.button("🚀 运行回测", type="primary", key="run_backtest_button"):
+                    with st.spinner("正在运行回测，请稍候..."):
+                        # 获取选定股票的价格序列
+                        price_series = data[backtest_stock]
+                        
+                        # 如果数据长度超过回测天数，则截取
+                        if len(price_series) > backtest_days:
+                            price_series = price_series.iloc[-backtest_days:]
+                        
+                        # 生成信号序列
+                        signal_series = generate_signal_series(price_series, rsi_buy=rsi_buy, rsi_sell=rsi_sell)
+                        
+                        # 运行回测
+                        result_df, metrics = run_vectorized_backtest(price_series, signal_series, 
+                                                                    initial_capital=initial_capital)
+                        
+                        # 保存结果到session_state
+                        st.session_state.backtest_results[backtest_stock] = (result_df, metrics)
+                        st.session_state.backtest_days = backtest_days
+                        st.session_state.backtest_initial_capital = initial_capital
+                        st.session_state.backtest_rsi_buy = rsi_buy
+                        st.session_state.backtest_rsi_sell = rsi_sell
+                        
+                        st.success("回测完成！")
+                
+                # 显示回测结果
+                if backtest_stock in st.session_state.backtest_results:
+                    result_df, metrics = st.session_state.backtest_results[backtest_stock]
+                    
+                    # 显示关键指标
+                    st.subheader("回测关键指标")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("总收益率", f"{metrics['total_return']:.2%}")
+                    with col2:
+                        st.metric("年化收益率", f"{metrics['annualized_return']:.2%}")
+                    with col3:
+                        st.metric("最大回撤", f"{metrics['max_drawdown']:.2%}")
+                    with col4:
+                        st.metric("夏普比率", f"{metrics['sharpe_ratio']:.2f}")
+                    
+                    col5, col6, col7, col8 = st.columns(4)
+                    with col5:
+                        st.metric("胜率", f"{metrics['win_rate']:.2%}")
+                    with col6:
+                        pl_ratio = metrics['profit_loss_ratio']
+                        if pl_ratio == np.inf:
+                            pl_ratio_display = "∞"
+                        else:
+                            pl_ratio_display = f"{pl_ratio:.2f}"
+                        st.metric("盈亏比", pl_ratio_display)
+                    with col7:
+                        st.metric("交易次数", f"{metrics['num_trades']}")
+                    with col8:
+                        st.metric("最终净值", f"{metrics['final_equity']:,.2f}元")
+                    
+                # 绘制回测图表
+                    # 重新获取价格序列（确保变量在作用域内）
+                    if 'backtest_stock' in locals() or 'backtest_stock' in globals():
+                        current_price_series = data[backtest_stock]
+                        if len(current_price_series) > backtest_days:
+                            current_price_series = current_price_series.iloc[-backtest_days:]
+                    else:
+                        current_price_series = price_series  # 回退到原始变量
+                    
+                    # 背离检测功能
+                    st.subheader("🔍 背离检测（寻找最高质量预警信号）")
+                    st.caption("背离是价格与RSI动能之间的失配，被视为趋势反转的最强预警信号之一。")
+                    
+                    col_div1, col_div2, col_div3 = st.columns(3)
+                    with col_div1:
+                        enable_divergence = st.checkbox("启用背离检测", value=True, key="enable_divergence_checkbox")
+                    with col_div2:
+                        divergence_order = st.slider("极值检测窗口", min_value=3, max_value=15, value=5, 
+                                                    help="窗口越大越稳健，窗口越小越灵敏")
+                    with col_div3:
+                        max_days_between = st.slider("最大时间间隔(天)", min_value=30, max_value=120, value=60,
+                                                     help="两个极值点之间的最大天数限制")
+                    
+                    if enable_divergence and not current_price_series.empty:
+                        with st.spinner("正在检测背离信号..."):
+                            # 准备数据进行背离检测
+                            price_data = current_price_series if 'current_price_series' in locals() else price_series
+                            df_for_divergence = pd.DataFrame({'close': price_data})
+                            
+                            # 检测背离
+                            divergence_df = detect_rsi_divergence(df_for_divergence, 
+                                                                order=divergence_order,
+                                                                max_days_between=max_days_between)
+                            
+                            # 保存结果到session_state
+                            st.session_state.divergence_results = divergence_df
+                            
+                            # 绘制带有背离信号的图表
+                            fig = plot_backtest_with_divergence(current_price_series, result_df, metrics, divergence_df)
+                            
+                            # 显示背离统计
+                            if divergence_df is not None:
+                                bearish_count = divergence_df['bearish_divergence'].sum()
+                                bullish_count = divergence_df['bullish_divergence'].sum()
+                                
+                                if bearish_count > 0 or bullish_count > 0:
+                                    st.success(f"发现 {bearish_count} 个顶背离信号和 {bullish_count} 个底背离信号")
+                    else:
+                        # 绘制普通回测图表
+                        fig = plot_backtest_results(current_price_series, result_df, metrics)
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 显示背离信号详情
+                    if 'divergence_results' in st.session_state and enable_divergence:
+                        divergence_df = st.session_state.divergence_results
+                        
+                        bearish_signals = divergence_df[divergence_df['bearish_divergence']]
+                        bullish_signals = divergence_df[divergence_df['bullish_divergence']]
+                        
+                        if not bearish_signals.empty or not bullish_signals.empty:
+                            st.subheader("📊 背离信号详情")
+                            
+                            if not bearish_signals.empty:
+                                st.markdown("**🔴 顶背离信号（卖出预警）**")
+                                bearish_display = bearish_signals[['close', 'divergence_strength']].copy()
+                                bearish_display['日期'] = bearish_display.index
+                                bearish_display['类型'] = '顶背离'
+                                bearish_display = bearish_display[['日期', 'close', 'divergence_strength', '类型']]
+                                bearish_display.columns = ['日期', '价格', '强度', '类型']
+                                st.dataframe(bearish_display.style.format({
+                                    '价格': '{:.2f}',
+                                    '强度': '{:.1f}'
+                                }))
+                            
+                            if not bullish_signals.empty:
+                                st.markdown("**🟢 底背离信号（买入预警）**")
+                                bullish_display = bullish_signals[['close', 'divergence_strength']].copy()
+                                bullish_display['日期'] = bullish_display.index
+                                bullish_display['类型'] = '底背离'
+                                bullish_display = bullish_display[['日期', 'close', 'divergence_strength', '类型']]
+                                bullish_display.columns = ['日期', '价格', '强度', '类型']
+                                st.dataframe(bullish_display.style.format({
+                                    '价格': '{:.2f}',
+                                    '强度': '{:.1f}'
+                                }))
+                            
+                            # 背离信号解读
+                            st.subheader("🧠 背离信号解读")
+                            if not bearish_signals.empty:
+                                st.warning("""
+                                **顶背离（红色向下箭头）**：
+                                - **表现**：价格创出新高，但RSI动能指标未能同步创出新高
+                                - **意义**：上涨动能枯竭，多头力量衰减
+                                - **建议**：考虑减仓或设置严格止损，防范趋势反转风险
+                                """)
+                            
+                            if not bullish_signals.empty:
+                                st.success("""
+                                **底背离（绿色向上箭头）**：
+                                - **临床表现**：价格创出新低，但RSI动能指标表现出更高的低点
+                                - **病理意义**：下跌动能衰减，空头力量耗尽
+                                - **临床建议**：考虑分批建仓或增加持仓，捕捉潜在反弹机会
+                                """)
+                    
+                    # 网格搜索功能
+                    st.subheader("🔍 网格搜索寻优（寻找最佳参数组合）")
+                    st.caption("通过穷举RSI参数组合，寻找在历史数据上表现最优的策略参数。")
+                    
+                    col_gs1, col_gs2, col_gs3 = st.columns(3)
+                    with col_gs1:
+                        windows_range = st.slider("RSI周期范围", min_value=6, max_value=30, value=(6, 20), step=2)
+                    with col_gs2:
+                        buy_range = st.slider("买入阈值范围", min_value=10, max_value=45, value=(25, 40), step=5)
+                    with col_gs3:
+                        sell_range = st.slider("卖出阈值范围", min_value=55, max_value=90, value=(65, 80), step=5)
+                    
+                    if st.button("🚀 执行网格搜索", type="secondary", key="run_grid_search_button"):
+                        with st.spinner("正在遍历参数组合，请稍候（这可能需要几分钟）..."):
+                            # 创建参数范围
+                            windows = range(windows_range[0], windows_range[1] + 1, 2)
+                            buy_thresholds = range(buy_range[0], buy_range[1] + 1, 5)
+                            sell_thresholds = range(sell_range[0], sell_range[1] + 1, 5)
+                            
+                            # 准备数据
+                            price_data = current_price_series if 'current_price_series' in locals() else price_series
+                            df_for_grid = pd.DataFrame({'close': price_data})
+                            
+                            # 运行简单网格搜索（快速）
+                            simple_results = rsi_grid_search(
+                                df_for_grid,
+                                windows=windows,
+                                buy_thresholds=buy_thresholds,
+                                sell_thresholds=sell_thresholds
+                            )
+                            
+                            # 保存结果到session_state
+                            st.session_state.grid_search_results = simple_results
+                            
+                            st.success(f"网格搜索完成！共测试了 {len(simple_results)} 个参数组合。")
+                    
+                    # 显示网格搜索结果
+                    if 'grid_search_results' in st.session_state and not st.session_state.grid_search_results.empty:
+                        gs_results = st.session_state.grid_search_results
+                        
+                        st.subheader("🏆 最优参数组合 Top 10")
+                        display_gs = gs_results.head(10).copy()
+                        display_gs['排名'] = range(1, len(display_gs) + 1)
+                        display_gs = display_gs[['排名', 'window', 'buy_threshold', 'sell_threshold', 
+                                                'total_return', 'sharpe', 'num_trades']]
+                        
+                        # 格式化显示
+                        st.dataframe(
+                            display_gs.style.format({
+                                'total_return': '{:.2%}',
+                                'sharpe': '{:.2f}'
+                            })
+                        )
+                        
+                        # 显示最优参数
+                        best_row = gs_results.iloc[0]
+                        st.success(
+                            f"**最优参数建议**: RSI周期={best_row['window']}天, "
+                            f"买入阈值={best_row['buy_threshold']}, "
+                            f"卖出阈值={best_row['sell_threshold']} "
+                            f"(总收益: {best_row['total_return']:.2%}, 夏普比率: {best_row['sharpe']:.2f})"
+                        )
+                        
+                        # 自动应用最优参数按钮
+                        if st.button("💾 应用最优参数到回测", type="primary", key="apply_best_params"):
+                            st.session_state.backtest_rsi_buy = best_row['buy_threshold']
+                            st.session_state.backtest_rsi_sell = best_row['sell_threshold']
+                            st.success(f"已更新RSI参数：买入={best_row['buy_threshold']}, 卖出={best_row['sell_threshold']}")
+                            st.rerun()
+            
+            # 背离信号实时监测 (独立图表)
+            st.subheader("🚦 背离信号实时监测")
+            st.caption("专为科研工作者设计的动能背离深度分析，识别价格与RSI动能的失配，捕捉趋势反转预警信号。")
+            
+            # 选择分析标的
+            target_stock = st.selectbox("选择分析标的", options=list(analysis_stocks.values()), key="divergence_target_select")
+            
+            if target_stock and target_stock in data.columns:
+                # 获取该个股的数据
+                single_df = pd.DataFrame({'close': data[target_stock]})
+                
+                # 计算RSI
+                single_df['rsi'] = calculate_rsi(single_df['close'])
+                
+                # 检测背离
+                with st.spinner(f"正在分析 {target_stock} 的背离信号..."):
+                    divergence_df = detect_rsi_divergence(single_df, order=5, max_days_between=60)
+                    
+                    # 绘图
+                    div_fig = plot_divergence_chart(divergence_df, target_stock)
+                    st.plotly_chart(div_fig, use_container_width=True)
+                    
+                    # 给出具体的科研判定建议
+                    # 检查最近5天是否有信号
+                    recent_days = 5
+                    if len(divergence_df) >= recent_days:
+                        latest_bull = divergence_df['bullish_divergence'].iloc[-recent_days:].any()
+                        latest_bear = divergence_df['bearish_divergence'].iloc[-recent_days:].any()
+                        
+                        if latest_bull:
+                            st.success(f"🔍 监测到 **{target_stock}** 近期出现【底背离】，提示下跌动能衰减，可考虑逐步建立头寸。")
+                        elif latest_bear:
+                            st.error(f"⚠️ 监测到 **{target_stock}** 近期出现【顶背离】，提示上涨动能枯竭，请务必注意风险，考虑减仓。")
+                        else:
+                            st.info(f"📊 **{target_stock}** 近期未检测到明显背离信号，当前趋势动能与价格方向一致。")
+                    
+            # 显示最近的背离信号详情
+                    bearish_signals = divergence_df[divergence_df['bearish_divergence']]
+                    bullish_signals = divergence_df[divergence_df['bullish_divergence']]
+                    
+                    if not bearish_signals.empty or not bullish_signals.empty:
+                        st.subheader("📋 历史背离信号记录")
+                        
+                        if not bearish_signals.empty:
+                            st.markdown("**🔴 顶背离信号记录**")
+                            bearish_display = bearish_signals[['close', 'divergence_strength']].copy()
+                            bearish_display['日期'] = bearish_display.index
+                            bearish_display['类型'] = '顶背离'
+                            bearish_display = bearish_display[['日期', 'close', 'divergence_strength', '类型']]
+                            bearish_display.columns = ['日期', '价格', '强度', '类型']
+                            st.dataframe(bearish_display.tail(5).style.format({
+                                '价格': '{:.2f}',
+                                '强度': '{:.1f}'
+                            }))
+                        
+                        if not bullish_signals.empty:
+                            st.markdown("**🟢 底背离信号记录**")
+                            bullish_display = bullish_signals[['close', 'divergence_strength']].copy()
+                            bullish_display['日期'] = bullish_display.index
+                            bullish_display['类型'] = '底背离'
+                            bullish_display = bullish_display[['日期', 'close', 'divergence_strength', '类型']]
+                            bullish_display.columns = ['日期', '价格', '强度', '类型']
+                            st.dataframe(bullish_display.tail(5).style.format({
+                                '价格': '{:.2f}',
+                                '强度': '{:.1f}'
+                            }))
+            
+            # 如果target_stock不在data中，显示警告
+            elif not target_stock or target_stock not in data.columns:
+                st.warning("请选择分析标的并确保数据可用。")
+            else:
+                st.warning("没有可用的股票数据进行回测。")
 
         with t3:
             st.subheader("资产相关性矩阵 (防范共振风险)")
@@ -452,6 +941,155 @@ if should_run_analysis and analysis_stocks:
                     for _, row in analysis_df.iterrows():
                         if row['调仓建议'] != '保持':
                             st.info(f"{row['标的']}: {row['调仓建议']}")
+
+        with t6:
+            st.subheader("📈 实盘持仓监测")
+            st.caption("基于真实交易记录计算盈亏情况")
+            
+            # 加载真实持仓
+            config = load_config()
+            portfolio = config.get('portfolio', [])
+            
+            if portfolio:
+                # 获取真实持仓的股票列表
+                real_stocks = [trade['name'] for trade in portfolio]
+                real_codes = [trade['code'] for trade in portfolio]
+                
+                # 检查真实持仓是否在分析范围内
+                missing_stocks = []
+                # 确保data是DataFrame，避免变量名冲突导致的AttributeError
+                if isinstance(data, pd.DataFrame):
+                    for name in real_stocks:
+                        if name not in data.columns:
+                            missing_stocks.append(name)
+                else:
+                    st.warning("数据格式异常，无法检查持仓股票")
+                    # 如果data不是DataFrame，假设所有股票都不在分析范围内
+                    missing_stocks = real_stocks.copy()
+                
+                if missing_stocks:
+                    st.warning(f"以下持仓股票不在当前分析范围内，无法计算盈亏：{', '.join(missing_stocks)}")
+                
+                # 计算盈亏
+                summary_df, total_market_value, total_profit_ratio = get_portfolio_summary(portfolio, data)
+                
+                if not summary_df.empty:
+                    # 显示总体指标
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("持仓总成本", f"{summary_df['成本'].sum():,.2f} 元")
+                    with col2:
+                        st.metric("持仓总市值", f"{total_market_value:,.2f} 元")
+                    with col3:
+                        profit_color = "red" if total_profit_ratio > 0 else "green"
+                        st.metric("总盈亏比例", f"{total_profit_ratio:.2%}", delta=f"{total_profit_ratio:.2%}")
+                    
+                    # 定义条件格式化函数（A股风格：红涨绿跌）
+                    def color_profit(val):
+                        if isinstance(val, (int, float)):
+                            color = 'red' if val > 0 else 'green'
+                            return f'color: {color}'
+                        return ''
+                    
+                    # 显示详细盈亏表
+                    st.subheader("📊 持仓盈亏明细")
+                    display_df = summary_df.copy()
+                    # 格式化数字显示
+                    display_df['成本价'] = display_df['成本价'].apply(lambda x: f"{x:.2f}")
+                    display_df['现价'] = display_df['现价'].apply(lambda x: f"{x:.2f}")
+                    display_df['成本'] = display_df['成本'].apply(lambda x: f"{x:,.2f}")
+                    display_df['市值'] = display_df['市值'].apply(lambda x: f"{x:,.2f}")
+                    display_df['盈亏额'] = display_df['盈亏额'].apply(lambda x: f"{x:+,.2f}")
+                    display_df['盈亏比'] = display_df['盈亏比'].apply(lambda x: f"{x:+.2%}")
+                    
+                    st.dataframe(
+                        display_df.style.map(color_profit, subset=['盈亏额', '盈亏比']),
+                        use_container_width=True
+                    )
+                    
+                    # 计算当前持仓权重（按市值）
+                    current_weights = {}
+                    for _, row in summary_df.iterrows():
+                        name = row['资产名称']
+                        # 处理市值数据：如果是字符串则移除逗号，如果是浮点数则直接使用
+                        market_val_str = str(row['市值'])
+                        if ',' in market_val_str:
+                            market_val = float(market_val_str.replace(',', ''))
+                        else:
+                            market_val = float(market_val_str)
+                        weight = market_val / total_market_value if total_market_value > 0 else 0
+                        current_weights[name] = weight
+                    
+                    # 获取最优权重
+                    optimal_weights = best_p[list(analysis_stocks.values())].to_dict()
+                    
+                    # 计算偏离度
+                    total_deviation, deviations = calculate_deviation(current_weights, optimal_weights)
+                    
+                    st.subheader("⚖️ 配置偏离度分析")
+                    st.metric("总配置偏离度", f"{total_deviation:.2%}")
+                    
+                    # 显示偏离度详情和建议
+                    deviation_df = pd.DataFrame([
+                        {
+                            "资产名称": name,
+                            "当前权重": f"{current_weights.get(name, 0):.1%}",
+                            "最优权重": f"{optimal_weights.get(name, 0):.1%}",
+                            "偏离度": f"{deviations.get(name, 0):.1%}"
+                        }
+                        for name in set(list(current_weights.keys()) + list(optimal_weights.keys()))
+                    ])
+                    
+                    if not deviation_df.empty:
+                        st.dataframe(deviation_df, use_container_width=True)
+                        
+                        # 给出具体建议
+                        st.subheader("💡 调仓建议")
+                        for name in deviations:
+                            if name in optimal_weights and name in current_weights:
+                                curr = current_weights[name]
+                                opt = optimal_weights[name]
+                                if curr > opt + 0.05:  # 偏离超过5%
+                                    reduction_pct = (curr - opt) * 100
+                                    st.warning(f"**{name}** 持仓过重，建议减仓 {reduction_pct:.1f}% 以回归最优夏普比率前沿。")
+                                elif opt > curr + 0.05:
+                                    increase_pct = (opt - curr) * 100
+                                    st.info(f"**{name}** 持仓不足，建议增仓 {increase_pct:.1f}% 以回归最优夏普比率前沿。")
+                    
+                    # 绘制资产配置饼图
+                    st.subheader("🥧 资产配置对比")
+                    fig_compare = go.Figure()
+                    
+                    # 当前配置
+                    fig_compare.add_trace(go.Pie(
+                        labels=list(current_weights.keys()),
+                        values=list(current_weights.values()),
+                        name="当前配置",
+                        hole=0.4,
+                        domain=dict(row=0, column=0)
+                    ))
+                    
+                    # 最优配置
+                    fig_compare.add_trace(go.Pie(
+                        labels=list(optimal_weights.keys()),
+                        values=list(optimal_weights.values()),
+                        name="最优配置",
+                        hole=0.4,
+                        domain=dict(row=0, column=1)
+                    ))
+                    
+                    fig_compare.update_layout(
+                        title_text="当前配置 vs 最优配置",
+                        grid=dict(rows=1, columns=2),
+                        height=400
+                    )
+                    
+                    st.plotly_chart(fig_compare, use_container_width=True)
+                    
+                else:
+                    st.info("无法计算持仓盈亏，请确保持仓股票在当前分析范围内。")
+            else:
+                st.info("暂无真实持仓记录。请在侧边栏录入交易记录。")
 
     else:
         st.error("网络连接异常，无法获取行情。")
