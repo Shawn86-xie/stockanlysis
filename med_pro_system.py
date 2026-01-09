@@ -1137,8 +1137,13 @@ if should_run_analysis and analysis_stocks:
                             
                             fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False, hovermode='x unified')
                             
-                            # 添加交互式框选提示
+                            # 添加交互式框选提示和拟合模型选择
                             st.info("📊 交互式趋势拟合分析：使用图表工具栏的框选工具（Box Select）选择一段区间，系统将自动绘制拟合线。")
+                            
+                            # 拟合模型选择器
+                            fit_degree = st.radio("拟合模型选择", [1, 2], 
+                                                 format_func=lambda x: "线性趋势 (速度)" if x==1 else "二次曲线 (动能加速度)", 
+                                                 horizontal=True, key="fit_degree_selector")
                             
                             # 渲染图表并捕获选择事件
                             event = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
@@ -1151,22 +1156,26 @@ if should_run_analysis and analysis_stocks:
                                 idx_end = selected_points[-1]["point_index"]
                                 df_slice = df.iloc[idx_start:idx_end+1]
                                 
-                                # 计算峰谷拟合
-                                peak_line, p_slope = fit_trend_line(df_slice, 'peak')
-                                valley_line, v_slope = fit_trend_line(df_slice, 'valley')
+                                # 计算峰谷拟合 (传入 degree 参数)
+                                peak_line, p_coeff, p_count = fit_trend_line(df_slice, 'peak', degree=fit_degree)
+                                valley_line, v_coeff, v_count = fit_trend_line(df_slice, 'valley', degree=fit_degree)
+                                
+                                # 定义图例标签前缀和系数名称
+                                prefix = "曲率a" if fit_degree == 2 else "斜率k"
+                                coeff_name = "曲率" if fit_degree == 2 else "斜率"
                                 
                                 # 将拟合线叠加到原图
                                 if peak_line is not None:
                                     fig.add_trace(go.Scatter(
                                         x=df_slice['日期'], y=peak_line, 
-                                        name=f"阻力线 (斜率:{p_slope:.2f})",
-                                        line=dict(color='red', dash='dash')
+                                        name=f"阻力曲线 ({prefix}:{p_coeff:.4f}, 点数:{p_count})",
+                                        line=dict(color='red', dash='dash', width=2)
                                     ), row=1, col=1)
                                 if valley_line is not None:
                                     fig.add_trace(go.Scatter(
                                         x=df_slice['日期'], y=valley_line, 
-                                        name=f"支撑线 (斜率:{v_slope:.2f})",
-                                        line=dict(color='green', dash='dash')
+                                        name=f"支撑曲线 ({prefix}:{v_coeff:.4f}, 点数:{v_count})",
+                                        line=dict(color='green', dash='dash', width=2)
                                     ), row=1, col=1)
                                 
                                 # 重新渲染图表
@@ -1175,24 +1184,52 @@ if should_run_analysis and analysis_stocks:
                                 # 显示拟合结果分析
                                 st.subheader("📈 拟合结果分析")
                                 if peak_line is not None:
-                                    if p_slope > 0:
-                                        st.success(f"阻力线斜率为正 ({p_slope:.2f})，表明在选区内压力位呈上升趋势。")
+                                    if fit_degree == 2:
+                                        # 二次曲线模式：曲率分析
+                                        if p_coeff > 0:
+                                            st.success(f"阻力线曲率为正 ({p_coeff:.4f})，凹面向上(∪形)，表明向下的动能在衰减，或者向上的动能在增强。")
+                                        elif p_coeff < 0:
+                                            st.warning(f"阻力线曲率为负 ({p_coeff:.4f})，凹面向下(∩形)，表明向上的动能在衰减(见顶信号)，或者向下的动能在增强。")
+                                        else:
+                                            st.info(f"阻力线曲率接近零 ({p_coeff:.4f})，接近直线趋势，动能稳定。")
                                     else:
-                                        st.warning(f"阻力线斜率为负 ({p_slope:.2f})，表明在选区内压力位呈下降趋势。")
+                                        # 线性模式：斜率分析
+                                        if p_coeff > 0:
+                                            st.success(f"阻力线斜率为正 ({p_coeff:.2f})，表明在选区内压力位呈上升趋势。")
+                                        else:
+                                            st.warning(f"阻力线斜率为负 ({p_coeff:.2f})，表明在选区内压力位呈下降趋势。")
                                 
                                 if valley_line is not None:
-                                    if v_slope > 0:
-                                        st.success(f"支撑线斜率为正 ({v_slope:.2f})，表明在选区内支撑位呈上升趋势。")
+                                    if fit_degree == 2:
+                                        # 二次曲线模式：曲率分析
+                                        if v_coeff > 0:
+                                            st.success(f"支撑线曲率为正 ({v_coeff:.4f})，凹面向上(∪形)，表明向下的动能在衰减，或者向上的动能在增强。")
+                                        elif v_coeff < 0:
+                                            st.warning(f"支撑线曲率为负 ({v_coeff:.4f})，凹面向下(∩形)，表明向上的动能在衰减(见顶信号)，或者向下的动能在增强。")
+                                        else:
+                                            st.info(f"支撑线曲率接近零 ({v_coeff:.4f})，接近直线趋势，动能稳定。")
                                     else:
-                                        st.warning(f"支撑线斜率为负 ({v_slope:.2f})，表明在选区内支撑位呈下降趋势。")
+                                        # 线性模式：斜率分析
+                                        if v_coeff > 0:
+                                            st.success(f"支撑线斜率为正 ({v_coeff:.2f})，表明在选区内支撑位呈上升趋势。")
+                                        else:
+                                            st.warning(f"支撑线斜率为负 ({v_coeff:.2f})，表明在选区内支撑位呈下降趋势。")
                                 
                                 # 平行通道判定
                                 if peak_line is not None and valley_line is not None:
-                                    slope_diff = abs(p_slope - v_slope)
-                                    if slope_diff < 0.1:  # 斜率相近
-                                        st.info("阻力线与支撑线斜率相近，形成平行通道，适合进行高抛低吸策略。")
+                                    coeff_diff = abs(p_coeff - v_coeff)
+                                    if fit_degree == 2:
+                                        # 二次曲线：曲率相近判定
+                                        if coeff_diff < 0.01:  # 曲率相近
+                                            st.info("阻力线与支撑线曲率相近，形成平行弯曲通道，适合进行高抛低吸策略。")
+                                        else:
+                                            st.info("阻力线与支撑线曲率差异明显，表明弯曲程度不同，动能变化不对称。")
                                     else:
-                                        st.info("阻力线与支撑线斜率差异明显，表明趋势通道正在扩大或收缩。")
+                                        # 线性：斜率相近判定
+                                        if coeff_diff < 0.1:  # 斜率相近
+                                            st.info("阻力线与支撑线斜率相近，形成平行通道，适合进行高抛低吸策略。")
+                                        else:
+                                            st.info("阻力线与支撑线斜率差异明显，表明趋势通道正在扩大或收缩。")
                                 
                                 # 突破判定
                                 if not df_slice.empty and peak_line is not None:
@@ -1200,6 +1237,13 @@ if should_run_analysis and analysis_stocks:
                                     latest_peak = peak_line[-1]
                                     if latest_close > latest_peak:
                                         st.success(f"最新收盘价 {latest_close:.2f} 已突破阻力线 {latest_peak:.2f}，可能形成突破信号。")
+                                    
+                                    # 二次曲线模式下的额外分析：趋势加速/减速
+                                    if fit_degree == 2 and peak_line is not None:
+                                        if p_coeff > 0:
+                                            st.info("阻力线曲率为正，凹面向上，突破后上涨动能可能加速。")
+                                        elif p_coeff < 0:
+                                            st.warning("阻力线曲率为负，凹面向下，突破后上涨动能可能减速。")
                             
                             st.caption(f"提示：当前正在对 {selected_name} 进行技术面独立审计。")
             
