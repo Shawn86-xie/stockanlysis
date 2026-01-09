@@ -12,6 +12,7 @@ from config import load_config, save_config, save_trade, delete_trade, clear_por
 from data_fetcher import fetch_stock_data, get_signals, compute_portfolio_stats, monte_carlo_simulation, get_recent_10_days, analyze_portfolio, get_portfolio_summary, calculate_deviation
 from ai_analyzer import deepseek_analyze
 from backtester import generate_signal_series, run_vectorized_backtest, plot_backtest_results, plot_backtest_with_divergence, rsi_grid_search, grid_search_with_backtest, detect_rsi_divergence, plot_divergence_chart, calculate_rsi
+from math_engine import fit_trend_line, detect_peaks_valleys
 
 # --- 环境与中文字体配置 ---
 plt.rcParams['font.sans-serif'] = ['SimHei']
@@ -366,7 +367,7 @@ if should_run_analysis and analysis_stocks:
         best_p = sim_res.iloc[sim_res['Sharpe'].idxmax()]
 
         # 功能标签页
-        t1, t2, t3, t4, t5, t6 = st.tabs(["💡 AI 资讯深度研判", "🚦 买卖与风险预警", "🕸️ 板块相关性分析", "📊 权重优化实验", "📈 模拟交易", "📈 实盘持仓监测"])
+        t1, t2, t3, t4, t5, t6, t7 = st.tabs(["💡 AI 资讯深度研判", "🚦 买卖与风险预警", "🕸️ 板块相关性分析", "📊 权重优化实验", "📈 模拟交易", "📈 实盘持仓监测", "📈 独立 K 线分析"])
 
         with t1:
             st.subheader("DeepSeek专业资讯评分")
@@ -975,7 +976,8 @@ if should_run_analysis and analysis_stocks:
                 
                 if not summary_df.empty:
                     # 显示总体指标
-                    col1, col2, col3 = st.columns(3)
+                    total_profit_amount = summary_df['盈亏额'].sum()
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric("持仓总成本", f"{summary_df['成本'].sum():,.2f} 元")
                     with col2:
@@ -983,6 +985,8 @@ if should_run_analysis and analysis_stocks:
                     with col3:
                         profit_color = "red" if total_profit_ratio > 0 else "green"
                         st.metric("总盈亏比例", f"{total_profit_ratio:.2%}", delta=f"{total_profit_ratio:.2%}")
+                    with col4:
+                        st.metric("盈亏总额", f"{total_profit_amount:+,.2f} 元", delta=f"{total_profit_amount:+,.2f}")
                     
                     # 定义条件格式化函数（A股风格：红涨绿跌）
                     def color_profit(val):
@@ -1090,6 +1094,122 @@ if should_run_analysis and analysis_stocks:
                     st.info("无法计算持仓盈亏，请确保持仓股票在当前分析范围内。")
             else:
                 st.info("暂无真实持仓记录。请在侧边栏录入交易记录。")
+
+        with t7:
+            st.subheader("📈 独立 K 线分析")
+            st.caption("独立技术分析模块，手动选择标的并启动K线分析，不影响主程序状态。")
+            
+            @st.fragment
+            def render_independent_kline(stock_pool):
+                st.subheader("🔍 个股独立技术分析 (手动模式)")
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    selected_name = st.selectbox("选择分析标的", options=list(stock_pool.values()), key="ind_kline_select")
+                    code = [c for c, n in stock_pool.items() if n == selected_name][0]
+                with col2:
+                    run_kline = st.checkbox("🚩 启动独立分析引擎", key="kline_active_flag")
+                
+                if run_kline:
+                    with st.spinner(f"正在调取 {selected_name} 全量历史数据..."):
+                        from data_fetcher import fetch_candle_data
+                        df = fetch_candle_data(code)
+                        
+                        if df.empty:
+                            st.error(f"无法获取 {selected_name} 的K线数据，请稍后重试。")
+                        else:
+                            import plotly.graph_objects as go
+                            from plotly.subplots import make_subplots
+                            
+                            # 创建基础K线图
+                            fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                               vertical_spacing=0.03, row_width=[0.2, 0.8])
+                            
+                            fig.add_trace(go.Candlestick(
+                                x=df['日期'], open=df['开盘'], high=df['最高'], low=df['最低'], close=df['收盘'],
+                                name='Price', increasing_line_color='#ff4444', decreasing_line_color='#00cc00'
+                            ), row=1, col=1)
+                            
+                            ma60 = df['收盘'].rolling(window=60).mean()
+                            fig.add_trace(go.Scatter(x=df['日期'], y=ma60, line=dict(color='orange', width=1.5), name='MA60'), row=1, col=1)
+                            
+                            fig.add_trace(go.Bar(x=df['日期'], y=df['成交量'], marker_color='gray', opacity=0.5, name='Volume'), row=2, col=1)
+                            
+                            fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False, hovermode='x unified')
+                            
+                            # 添加交互式框选提示
+                            st.info("📊 交互式趋势拟合分析：使用图表工具栏的框选工具（Box Select）选择一段区间，系统将自动绘制拟合线。")
+                            
+                            # 渲染图表并捕获选择事件
+                            event = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+                            
+                            # 如果用户进行了框选
+                            if event and "selection" in event and len(event["selection"]["points"]) > 0:
+                                # 获取选区索引范围
+                                selected_points = event["selection"]["points"]
+                                idx_start = selected_points[0]["point_index"]
+                                idx_end = selected_points[-1]["point_index"]
+                                df_slice = df.iloc[idx_start:idx_end+1]
+                                
+                                # 计算峰谷拟合
+                                peak_line, p_slope = fit_trend_line(df_slice, 'peak')
+                                valley_line, v_slope = fit_trend_line(df_slice, 'valley')
+                                
+                                # 将拟合线叠加到原图
+                                if peak_line is not None:
+                                    fig.add_trace(go.Scatter(
+                                        x=df_slice['日期'], y=peak_line, 
+                                        name=f"阻力线 (斜率:{p_slope:.2f})",
+                                        line=dict(color='red', dash='dash')
+                                    ), row=1, col=1)
+                                if valley_line is not None:
+                                    fig.add_trace(go.Scatter(
+                                        x=df_slice['日期'], y=valley_line, 
+                                        name=f"支撑线 (斜率:{v_slope:.2f})",
+                                        line=dict(color='green', dash='dash')
+                                    ), row=1, col=1)
+                                
+                                # 重新渲染图表
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # 显示拟合结果分析
+                                st.subheader("📈 拟合结果分析")
+                                if peak_line is not None:
+                                    if p_slope > 0:
+                                        st.success(f"阻力线斜率为正 ({p_slope:.2f})，表明在选区内压力位呈上升趋势。")
+                                    else:
+                                        st.warning(f"阻力线斜率为负 ({p_slope:.2f})，表明在选区内压力位呈下降趋势。")
+                                
+                                if valley_line is not None:
+                                    if v_slope > 0:
+                                        st.success(f"支撑线斜率为正 ({v_slope:.2f})，表明在选区内支撑位呈上升趋势。")
+                                    else:
+                                        st.warning(f"支撑线斜率为负 ({v_slope:.2f})，表明在选区内支撑位呈下降趋势。")
+                                
+                                # 平行通道判定
+                                if peak_line is not None and valley_line is not None:
+                                    slope_diff = abs(p_slope - v_slope)
+                                    if slope_diff < 0.1:  # 斜率相近
+                                        st.info("阻力线与支撑线斜率相近，形成平行通道，适合进行高抛低吸策略。")
+                                    else:
+                                        st.info("阻力线与支撑线斜率差异明显，表明趋势通道正在扩大或收缩。")
+                                
+                                # 突破判定
+                                if not df_slice.empty and peak_line is not None:
+                                    latest_close = df_slice['收盘'].iloc[-1]
+                                    latest_peak = peak_line[-1]
+                                    if latest_close > latest_peak:
+                                        st.success(f"最新收盘价 {latest_close:.2f} 已突破阻力线 {latest_peak:.2f}，可能形成突破信号。")
+                            
+                            st.caption(f"提示：当前正在对 {selected_name} 进行技术面独立审计。")
+            
+            if analysis_stocks:
+                stock_pool = analysis_stocks
+            else:
+                first_cat = list(st.session_state.master_pool.keys())[0]
+                stock_pool = st.session_state.master_pool[first_cat]
+            
+            render_independent_kline(stock_pool)
 
     else:
         st.error("网络连接异常，无法获取行情。")

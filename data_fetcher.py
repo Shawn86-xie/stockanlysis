@@ -2,6 +2,7 @@ import pandas as pd
 import akshare as ak
 import numpy as np
 from datetime import datetime, timedelta
+import streamlit as st
 
 def fetch_stock_data(codes, names):
     """
@@ -372,3 +373,50 @@ def search_stock_info(query):
                 {'code': '603259', 'name': '药明康德'}
             ]
         return []
+
+
+@st.cache_data(ttl=1800)  # 30分钟缓存
+def fetch_candle_data(code, days=365):
+    """
+    获取股票的OHLC数据（开盘、最高、最低、收盘、成交量）
+    Args:
+        code: 股票代码
+        days: 历史天数，默认365天
+    Returns:
+        DataFrame，包含日期、开盘、最高、最低、收盘、成交量
+    """
+    try:
+        import akshare as ak
+        from datetime import datetime, timedelta
+        
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+        
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+        
+        # 确保返回的是DataFrame且有需要的列
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            print(f"获取 {code} 的K线数据失败: 返回空DataFrame")
+            return pd.DataFrame()
+        
+        # 重命名列
+        df = df.rename(columns={
+            '日期': '日期',
+            '开盘': '开盘',
+            '最高': '最高',
+            '最低': '最低',
+            '收盘': '收盘',
+            '成交量': '成交量'
+        })
+        
+        # 确保数据类型正确
+        numeric_cols = ['开盘', '最高', '最低', '收盘', '成交量']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        df['日期'] = pd.to_datetime(df['日期'])
+        
+        return df[['日期', '开盘', '最高', '最低', '收盘', '成交量']]
+    except Exception as e:
+        print(f"获取 {code} 的K线数据失败: {e}")
+        return pd.DataFrame()

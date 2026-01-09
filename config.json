@@ -44,44 +44,44 @@
     },
     "portfolio": [
         {
+            "code": "300253",
+            "name": "卫宁健康",
+            "buy_price": 10.56,
+            "quantity": 100,
+            "buy_date": "2026-01-09",
+            "timestamp": 1767930707
+        },
+        {
             "code": "601319",
             "name": "中国人保",
-            "buy_price": 9.89,
-            "quantity": 300,
-            "buy_date": "2026-01-07",
-            "timestamp": 1767847427
+            "buy_price": 9.9,
+            "quantity": 1000,
+            "buy_date": "2026-01-09",
+            "timestamp": 1767930733
         },
         {
             "code": "300229",
             "name": "拓尔思",
-            "buy_price": 20.32,
-            "quantity": 2000,
-            "buy_date": "2026-01-07",
-            "timestamp": 1767847472
+            "buy_price": 21.0,
+            "quantity": 500,
+            "buy_date": "2026-01-09",
+            "timestamp": 1767930760
         },
         {
-            "code": "300253",
-            "name": "卫宁健康",
-            "buy_price": 9.09,
-            "quantity": 2000,
-            "buy_date": "2026-01-07",
-            "timestamp": 1767847497
-        },
-        {
-            "code": "601319",
-            "name": "中国人保",
-            "buy_price": 9.95,
-            "quantity": 600,
-            "buy_date": "2026-01-07",
-            "timestamp": 1767847517
+            "code": "000810",
+            "name": "创维数字",
+            "buy_price": 12.45,
+            "quantity": 900,
+            "buy_date": "2026-01-09",
+            "timestamp": 1767930779
         },
         {
             "code": "600435",
             "name": "北方导航",
-            "buy_price": 19.82,
-            "quantity": 700,
-            "buy_date": "2026-01-07",
-            "timestamp": 1767847538
+            "buy_price": 21.428,
+            "quantity": 600,
+            "buy_date": "2026-01-09",
+            "timestamp": 1767930800
         }
     ]
 }
