@@ -111,12 +111,24 @@ best_p = page_data['best_p']
 st.subheader("📈 独立 K 线分析")
 st.caption("独立技术分析模块，手动选择标的并启动K线分析，不影响主程序状态。")
 
-def render_independent_kline(stock_pool):
+def render_independent_kline(stock_pool, jump_target=None):
     st.subheader("🔍 个股独立技术分析 (手动模式)")
-    
+
+    stock_names = list(stock_pool.values())
+
+    # 处理从其他页面跳转过来的情况
+    if jump_target and jump_target.get('name') in stock_names:
+        target_name = jump_target['name']
+        target_index = stock_names.index(target_name)
+        st.info(f"📍 已从优先度雷达跳转，自动选中: **{target_name}**")
+
+        # 强制更新 session_state 中的 widget 值（绕过 Streamlit 的缓存机制）
+        st.session_state.ind_kline_select = target_name
+        st.session_state.kline_active_flag = True
+
     col1, col2 = st.columns([3, 1])
     with col1:
-        selected_name = st.selectbox("选择分析标的", options=list(stock_pool.values()), key="ind_kline_select")
+        selected_name = st.selectbox("选择分析标的", options=stock_names, key="ind_kline_select")
         code = [c for c, n in stock_pool.items() if n == selected_name][0]
     with col2:
         run_kline = st.checkbox("🚩 启动独立分析引擎", key="kline_active_flag")
@@ -323,10 +335,21 @@ def render_independent_kline(stock_pool):
 
                 st.caption(f"提示：当前正在对 {selected_name} 进行技术面独立审计。")
 
+# 检查是否有从其他页面跳转过来的目标标的
+jump_target = st.session_state.pop('kline_jump_target', None)
+
 if analysis_stocks:
-    stock_pool = analysis_stocks
+    stock_pool = analysis_stocks.copy()
 else:
     first_cat = list(st.session_state.master_pool.keys())[0]
-    stock_pool = st.session_state.master_pool[first_cat]
+    stock_pool = st.session_state.master_pool[first_cat].copy()
 
-render_independent_kline(stock_pool)
+# 如果有跳转目标，确保它在 stock_pool 中
+if jump_target:
+    target_code = jump_target.get('code')
+    target_name = jump_target.get('name')
+    if target_code and target_name and target_code not in stock_pool:
+        # 将跳转目标添加到池子中
+        stock_pool[target_code] = target_name
+
+render_independent_kline(stock_pool, jump_target)

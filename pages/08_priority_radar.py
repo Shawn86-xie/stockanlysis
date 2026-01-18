@@ -459,11 +459,22 @@ if not selected_row.empty:
     
     col1, col2 = st.columns(2)
     with col1:
-        # 跳转到独立K线分析页面
-        st.page_link("pages/07_kline_lab.py", label=f"📈 独立K线分析 - {selected_name}", icon="📈")
+        # 跳转到独立K线分析页面（使用按钮+switch_page实现参数传递）
+        if st.button(f"📈 独立K线分析 - {selected_name}", key="goto_kline", use_container_width=True):
+            # 保存选中的标的到 session_state，供目标页面读取
+            st.session_state.kline_jump_target = {
+                'code': selected_code,
+                'name': selected_name
+            }
+            st.switch_page("pages/07_kline_lab.py")
     with col2:
         # 跳转到AI资讯分析页面
-        st.page_link("pages/01_ai_news.py", label=f"💡 AI资讯分析 - {selected_name}", icon="💡")
+        if st.button(f"💡 AI资讯分析 - {selected_name}", key="goto_ai_news", use_container_width=True):
+            st.session_state.ai_news_jump_target = {
+                'code': selected_code,
+                'name': selected_name
+            }
+            st.switch_page("pages/01_ai_news.py")
     
     # 显示选中标的的详细指标
     with st.expander(f"📊 {selected_name} 详细指标", expanded=False):
