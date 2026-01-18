@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  medportfolio:
+    build: .
+    container_name: medportfolio_2026
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONFIG_PATH=/app/data/config.json
+    volumes:
+      # 挂载数据目录，用于持久化配置文件和缓存数据
+      - ./data:/app/data
+      # 可选：挂载日志目录
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - medportfolio_network
+
+networks:
+  medportfolio_network:
+    driver: bridge
+
+# 数据卷定义（如果需要独立的数据卷）
+volumes:
+  # 如果需要持久化数据卷，可以取消注释下面的配置
+  # medportfolio_data:
+  #   driver: local
+  # medportfolio_logs:
+  #   driver: local

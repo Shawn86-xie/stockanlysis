@@ -6,16 +6,31 @@ import seaborn as sns
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
+import time
 
 # 导入自定义模块
 from config import load_config, save_config, save_trade, delete_trade, clear_portfolio
-from data_fetcher import fetch_stock_data, get_signals, compute_portfolio_stats, monte_carlo_simulation, get_recent_10_days, analyze_portfolio, get_portfolio_summary, calculate_deviation
+from data_fetcher import fetch_stock_data, get_signals, compute_portfolio_stats, monte_carlo_simulation, get_recent_10_days, analyze_portfolio, get_portfolio_summary, calculate_deviation, fetch_latest_prices
 from ai_analyzer import deepseek_analyze
 from backtester import generate_signal_series, run_vectorized_backtest, plot_backtest_results, plot_backtest_with_divergence, rsi_grid_search, grid_search_with_backtest, detect_rsi_divergence, plot_divergence_chart, calculate_rsi
 from math_engine import fit_trend_line, detect_peaks_valleys
+from font_utils import setup_chinese_font
 
 # --- 环境与中文字体配置 ---
-plt.rcParams['font.sans-serif'] = ['SimHei']
+# Plotly 图表配置 (符合 Streamlit 2026 标准)
+PLOTLY_CONFIG = {
+    'displayModeBar': True,    # 显示工具栏
+    'displaylogo': False,      # 隐藏 Plotly Logo
+    'modeBarButtonsToRemove': ['lasso2d'],  # 保留select2d框选工具
+    'responsive': True         # 自适应容器
+}
+
+# 自动配置中文字体，优先检测Linux系统路径下的中文字体（如Noto Sans CJK）
+font_name, font_path = setup_chinese_font()
+if font_name:
+    print(f"已使用中文字体: {font_name}")
+else:
+    print("使用默认字体配置")
 plt.rcParams['axes.unicode_minus'] = False
 st.set_page_config(page_title="2026 量化决策看板", layout="wide")
 
@@ -107,7 +122,7 @@ with st.sidebar.expander("📚 标的库管理", expanded=False):
     with col_cat:
         new_category = st.selectbox("分类", ["核心组合", "科研/肾科", "其他"], key="new_category")
     
-    if st.button("➕ 添加标的", type="secondary", use_container_width=True):
+    if st.button("➕ 添加标的", type="secondary", width='stretch'):
         if new_code and new_name:
             # 确保分类存在
             if new_category not in st.session_state.master_pool:
@@ -130,7 +145,7 @@ with st.sidebar.expander("📚 标的库管理", expanded=False):
     for cat, stocks in list(st.session_state.master_pool.items()):
         st.write(f"**{cat}**")
         for c, n in list(stocks.items()):
-            if st.button(f"🗑️ 删除 {n} ({c})", key=f"del_{cat}_{c}", width='content'):
+            if st.button(f"🗑️ 删除 {n} ({c})", key=f"del_{cat}_{c}"):
                 del st.session_state.master_pool[cat][c]
                 # 如果分类为空，删除分类
                 if not st.session_state.master_pool[cat]:
@@ -140,7 +155,7 @@ with st.sidebar.expander("📚 标的库管理", expanded=False):
     
     # 保存标的库按钮
     st.subheader("保存标的库")
-    if st.button("💾 保存标的库到配置文件", type="primary", use_container_width=True):
+    if st.button("💾 保存标的库到配置文件", type="primary", width='stretch'):
         config['master_pool'] = st.session_state.master_pool
         save_config(config)
         st.success("标的库已保存到配置文件！")
@@ -187,7 +202,7 @@ with st.sidebar.expander("📝 录入新交易", expanded=False):
                 timestamp = int(datetime.now().timestamp())
                 st.text(f"时间戳: {timestamp}")
             
-            if st.button("💾 保存交易记录", type="primary", use_container_width=True):
+            if st.button("💾 保存交易记录", type="primary", width='stretch'):
                 # 数据完整性检查
                 if buy_price <= 0:
                     st.error("买入均价必须大于0")
@@ -232,7 +247,7 @@ with st.sidebar.expander("📝 录入新交易", expanded=False):
                     st.rerun()
         
         # 一键清空按钮
-        if st.button("⚠️ 一键清空持仓", type="secondary", use_container_width=True):
+        if st.button("⚠️ 一键清空持仓", type="secondary", width='stretch'):
             config = clear_portfolio(config)
             st.success("持仓记录已清空")
             st.rerun()
@@ -247,12 +262,18 @@ stop_loss_val = st.sidebar.slider("风险提醒阈值 (止损)", -0.10, -0.01, c
 sim_num = st.sidebar.number_input("模拟次数", value=config.get("default_sim_count", 3000),
                                    help="蒙特卡洛模拟中随机生成的投资组合数量。模拟次数越多，结果越精确，但计算时间越长。")
 
+# 新闻数量设置
+news_count = st.sidebar.number_input("新闻获取数量", min_value=1, max_value=20, 
+                                     value=config.get("news_count", 5),
+                                     help="每个标的获取的最新新闻数量，默认为5条。",
+                                     key="news_count_input")
+
 st.sidebar.markdown("---")
 
 # 设置管理按钮
 col_save, col_load = st.sidebar.columns(2)
 with col_save:
-    if st.button("💾 保存当前设置", use_container_width=True):
+    if st.button("💾 保存当前设置", width='stretch'):
         # 收集当前选择
         selected_codes = []
         for cat, stocks in st.session_state.master_pool.items():
@@ -271,7 +292,8 @@ with col_save:
             'selected_codes': selected_codes,
             'holdings': holdings_save,
             'stop_loss': stop_loss_val,
-            'sim_num': sim_num
+            'sim_num': sim_num,
+            'news_count': news_count
         }
         
     # 保存DeepSeek密钥到配置
@@ -280,11 +302,12 @@ with col_save:
     
     # 更新全局配置并保存到文件
     config['user_settings'] = st.session_state.user_settings
+    config['news_count'] = news_count
     save_config(config)
     st.sidebar.success("设置已保存！")
 
 with col_load:
-    if st.button("📂 加载保存的设置", use_container_width=True):
+    if st.button("📂 加载保存的设置", width='stretch'):
         if st.session_state.user_settings:
             # 恢复选择状态
             saved_codes = st.session_state.user_settings.get('selected_codes', [])
@@ -296,6 +319,10 @@ with col_load:
             saved_holdings = st.session_state.user_settings.get('holdings', {})
             for name, qty in saved_holdings.items():
                 st.session_state[f"hold_{name}"] = qty
+            
+            # 恢复新闻数量设置
+            saved_news_count = st.session_state.user_settings.get('news_count', 5)
+            st.session_state["news_count_input"] = saved_news_count
             
             st.sidebar.success("设置已加载！")
         else:
@@ -319,10 +346,42 @@ for cat, stocks in st.session_state.master_pool.items():
 
 st.sidebar.markdown("---")
 # 开始统计按钮
-if st.sidebar.button("🚀 开始统计", type="primary", use_container_width=True):
+if st.sidebar.button("🚀 开始统计", type="primary", width='stretch'):
+    # 保存当前勾选状态到配置文件
+    selected_codes = []
+    for cat, stocks in st.session_state.master_pool.items():
+        for c, n in stocks.items():
+            if st.session_state.get(f"sel_{c}", True):
+                selected_codes.append(c)
+    
+    # 收集其他设置
+    holdings_save = {}
+    selected_names = [st.session_state.master_pool[cat][c] for cat in st.session_state.master_pool for c in selected_codes if c in st.session_state.master_pool[cat]]
+    for name in selected_names:
+        holdings_save[name] = st.session_state.get(f"hold_{name}", 0)
+    
+    # 更新user_settings
+    st.session_state.user_settings = {
+        'selected_codes': selected_codes,
+        'holdings': holdings_save,
+        'stop_loss': stop_loss_val,
+        'sim_num': sim_num,
+        'news_count': news_count
+    }
+    
+    # 保存DeepSeek密钥到配置
+    if ds_key:
+        config['deepseek_api_key'] = ds_key
+    
+    # 更新全局配置并保存到文件
+    config['user_settings'] = st.session_state.user_settings
+    config['news_count'] = news_count
+    save_config(config)
+    
+    # 设置分析状态
     st.session_state.run_analysis = True
     st.session_state.selected_stocks = final_sel.copy()
-    st.sidebar.success("开始分析选中的标的...")
+    st.sidebar.success("开始分析选中的标的，且勾选状态已自动保存！")
     # 注意：这里不能直接rerun，因为需要先保存session_state
     # 我们将在主界面中根据run_analysis状态来触发分析
 
@@ -383,7 +442,7 @@ if should_run_analysis and analysis_stocks:
                     for c, n in analysis_stocks.items():
                         try:
                             import akshare as ak
-                            news = ak.stock_news_em(symbol=c).head(2)
+                            news = ak.stock_news_em(symbol=c).head(news_count)
                             news_list = []
                             for _, row in news.iterrows():
                                 # 获取发布日期（假设列名为'新闻发布时间'，如果没有则使用None）
@@ -473,10 +532,7 @@ if should_run_analysis and analysis_stocks:
             cum_returns = (1 + returns).cumprod()
             stock_names = list(analysis_stocks.values())
             
-            # 使用@st.fragment实现局部渲染，避免整体刷新
-            @st.fragment
             def render_interactive_plot(cum_returns, stock_names):
-                # 此函数内部的交互，不会触发主脚本的 Rerun
                 highlighted = st.selectbox(
                     "选择要突出显示的股票（或点击图例隐藏/显示）",
                     options=stock_names,
@@ -502,9 +558,8 @@ if should_run_analysis and analysis_stocks:
                     hovermode="x unified",
                     showlegend=True,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
             
-            # 调用局部片段，实现“无刷新”切换
             render_interactive_plot(cum_returns, stock_names)
             
             # 显示最近10个交易日价格数据
@@ -644,7 +699,7 @@ if should_run_analysis and analysis_stocks:
                         # 绘制普通回测图表
                         fig = plot_backtest_results(current_price_series, result_df, metrics)
                     
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
                     
                     # 显示背离信号详情
                     if 'divergence_results' in st.session_state and enable_divergence:
@@ -788,7 +843,7 @@ if should_run_analysis and analysis_stocks:
                     
                     # 绘图
                     div_fig = plot_divergence_chart(divergence_df, target_stock)
-                    st.plotly_chart(div_fig, use_container_width=True)
+                    st.plotly_chart(div_fig, use_container_width=True, config=PLOTLY_CONFIG)
                     
                     # 给出具体的科研判定建议
                     # 检查最近5天是否有信号
@@ -886,7 +941,7 @@ if should_run_analysis and analysis_stocks:
                     for name in analysis_stocks.values():
                         display_df[name] = display_df[name].apply(lambda x: f"{x:.1%}")
                     
-                    st.dataframe(display_df, use_container_width=True)
+                    st.dataframe(display_df, width='stretch')
                     st.caption(f"共模拟 {sim_num} 次，展示了夏普比率最高的10个组合")
                 
                 fig_ef, ax_ef = plt.subplots()
@@ -947,159 +1002,118 @@ if should_run_analysis and analysis_stocks:
             st.subheader("📈 实盘持仓监测")
             st.caption("基于真实交易记录计算盈亏情况")
             
-            # 加载真实持仓
-            config = load_config()
-            portfolio = config.get('portfolio', [])
+            # 1. 刷新控制区 (放在 fragment 外，确保控制组件本身不被局部刷新频率干扰)
+            col_refresh1, col_refresh2 = st.columns([1, 3])
+            with col_refresh1:
+                auto_refresh = st.checkbox("⏱️ 启用自动刷新", value=False, key="auto_refresh_t6")
+                # 如果开启自动刷新，设置频率（秒），否则为 None
+                refresh_freq = 600 if auto_refresh else None
             
-            if portfolio:
-                # 获取真实持仓的股票列表
-                real_stocks = [trade['name'] for trade in portfolio]
-                real_codes = [trade['code'] for trade in portfolio]
+            # 2. 定义局部刷新片段
+            # run_every 会在不重绘整个页面的情况下，只触发该函数内部逻辑
+            @st.fragment(run_every=refresh_freq)
+            def render_portfolio_fragment_v2():
+                # 注意：manual_btn 放在内部，点击它只会触发本片段刷新
+                btn_col1, btn_col2 = st.columns([1, 4])
+                with btn_col1:
+                    refresh_now = st.button("🔄 立即刷新", type="primary", key="inner_refresh_t6")
                 
-                # 检查真实持仓是否在分析范围内
-                missing_stocks = []
-                # 确保data是DataFrame，避免变量名冲突导致的AttributeError
-                if isinstance(data, pd.DataFrame):
-                    for name in real_stocks:
-                        if name not in data.columns:
-                            missing_stocks.append(name)
-                else:
-                    st.warning("数据格式异常，无法检查持仓股票")
-                    # 如果data不是DataFrame，假设所有股票都不在分析范围内
-                    missing_stocks = real_stocks.copy()
+                # 处理缓存清理：修复之前的 TypeError
+                if refresh_now:
+                    # 正确做法：直接调用缓存函数的 .clear() 方法
+                    fetch_latest_prices.clear()
+                    st.toast("已清除缓存，正在获取最新行情...", icon="🔄")
+
+                # 加载持仓 (每次片段执行都会重新 load 确保准确)
+                current_config = load_config()
+                current_portfolio = current_config.get('portfolio', [])
                 
-                if missing_stocks:
-                    st.warning(f"以下持仓股票不在当前分析范围内，无法计算盈亏：{', '.join(missing_stocks)}")
+                if not current_portfolio:
+                    st.info("暂无真实持仓记录。请在侧边栏录入交易。")
+                    return
+
+                # 准备数据
+                real_stocks = [trade['name'] for trade in current_portfolio]
+                real_codes = [trade['code'] for trade in current_portfolio]
+
+                # 获取价格 (使用 spinner 提示局部加载状态)
+                with st.spinner("同步实时行情..."):
+                    latest_price_df = fetch_latest_prices(real_codes, real_stocks)
                 
+                # 备用逻辑
+                if latest_price_df.empty or latest_price_df.isna().all().all():
+                    latest_price_df = data[real_stocks].iloc[[-1]]
+
                 # 计算盈亏
-                summary_df, total_market_value, total_profit_ratio = get_portfolio_summary(portfolio, data)
+                summary_df, total_market_value, total_profit_ratio = get_portfolio_summary(current_portfolio, latest_price_df)
                 
                 if not summary_df.empty:
-                    # 显示总体指标
+                    # 显示指标 (Metric)
                     total_profit_amount = summary_df['盈亏额'].sum()
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("持仓总成本", f"{summary_df['成本'].sum():,.2f} 元")
-                    with col2:
-                        st.metric("持仓总市值", f"{total_market_value:,.2f} 元")
-                    with col3:
-                        profit_color = "red" if total_profit_ratio > 0 else "green"
-                        st.metric("总盈亏比例", f"{total_profit_ratio:.2%}", delta=f"{total_profit_ratio:.2%}")
-                    with col4:
-                        st.metric("盈亏总额", f"{total_profit_amount:+,.2f} 元", delta=f"{total_profit_amount:+,.2f}")
-                    
-                    # 定义条件格式化函数（A股风格：红涨绿跌）
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("持仓总成本", f"{summary_df['成本'].sum():,.2f}")
+                    m2.metric("持仓总市值", f"{total_market_value:,.2f}")
+                    # A股习惯：正数红，负数绿
+                    m3.metric("总盈亏比例", f"{total_profit_ratio:.2%}", delta=f"{total_profit_ratio:.2%}")
+                    m4.metric("盈亏总额", f"{total_profit_amount:+,.2f}", delta=f"{total_profit_amount:+,.2f}")
+
+                    # --- 表格展示 ---
+                    # 定义条件格式化函数
                     def color_profit(val):
                         if isinstance(val, (int, float)):
-                            color = 'red' if val > 0 else 'green'
-                            return f'color: {color}'
+                            return 'color: #ff4444' if val > 0 else 'color: #00cc00'
+                        if isinstance(val, str) and '+' in val: return 'color: #ff4444'
+                        if isinstance(val, str) and '-' in val: return 'color: #00cc00'
                         return ''
-                    
-                    # 显示详细盈亏表
+
                     st.subheader("📊 持仓盈亏明细")
                     display_df = summary_df.copy()
-                    # 格式化数字显示
-                    display_df['成本价'] = display_df['成本价'].apply(lambda x: f"{x:.2f}")
-                    display_df['现价'] = display_df['现价'].apply(lambda x: f"{x:.2f}")
-                    display_df['成本'] = display_df['成本'].apply(lambda x: f"{x:,.2f}")
-                    display_df['市值'] = display_df['市值'].apply(lambda x: f"{x:,.2f}")
-                    display_df['盈亏额'] = display_df['盈亏额'].apply(lambda x: f"{x:+,.2f}")
-                    display_df['盈亏比'] = display_df['盈亏比'].apply(lambda x: f"{x:+.2%}")
                     
+                    # 格式化
+                    for col in ['成本价', '现价', '成本', '市值']:
+                        display_df[col] = display_df[col].map('{:,.2f}'.format)
+                    display_df['盈亏比'] = display_df['盈亏比'].map('{:+.2%}'.format)
+                    display_df['盈亏额'] = display_df['盈亏额'].map('{:+,.2f}'.format)
+
+                    # 【核心优化】使用固定高度 height=400 彻底锁死布局
                     st.dataframe(
                         display_df.style.map(color_profit, subset=['盈亏额', '盈亏比']),
-                        use_container_width=True
+                        width='stretch',
+                        height=400 
                     )
-                    
-                    # 计算当前持仓权重（按市值）
-                    current_weights = {}
-                    for _, row in summary_df.iterrows():
-                        name = row['资产名称']
-                        # 处理市值数据：如果是字符串则移除逗号，如果是浮点数则直接使用
-                        market_val_str = str(row['市值'])
-                        if ',' in market_val_str:
-                            market_val = float(market_val_str.replace(',', ''))
-                        else:
-                            market_val = float(market_val_str)
-                        weight = market_val / total_market_value if total_market_value > 0 else 0
-                        current_weights[name] = weight
-                    
-                    # 获取最优权重
-                    optimal_weights = best_p[list(analysis_stocks.values())].to_dict()
-                    
-                    # 计算偏离度
-                    total_deviation, deviations = calculate_deviation(current_weights, optimal_weights)
-                    
+
+                    # --- 偏离度分析 ---
                     st.subheader("⚖️ 配置偏离度分析")
-                    st.metric("总配置偏离度", f"{total_deviation:.2%}")
+                    current_weights = {row['资产名称']: row['市值']/total_market_value for _, row in summary_df.iterrows()}
+                    optimal_weights = best_p[list(analysis_stocks.values())].to_dict()
+                    total_dev, deviations = calculate_deviation(current_weights, optimal_weights)
                     
-                    # 显示偏离度详情和建议
-                    deviation_df = pd.DataFrame([
-                        {
-                            "资产名称": name,
-                            "当前权重": f"{current_weights.get(name, 0):.1%}",
-                            "最优权重": f"{optimal_weights.get(name, 0):.1%}",
-                            "偏离度": f"{deviations.get(name, 0):.1%}"
-                        }
-                        for name in set(list(current_weights.keys()) + list(optimal_weights.keys()))
-                    ])
+                    st.write(f"当前配置与 AI 模型最优前沿的**总偏离度**: `{total_dev:.2%}`")
                     
-                    if not deviation_df.empty:
-                        st.dataframe(deviation_df, use_container_width=True)
-                        
-                        # 给出具体建议
-                        st.subheader("💡 调仓建议")
-                        for name in deviations:
-                            if name in optimal_weights and name in current_weights:
-                                curr = current_weights[name]
-                                opt = optimal_weights[name]
-                                if curr > opt + 0.05:  # 偏离超过5%
-                                    reduction_pct = (curr - opt) * 100
-                                    st.warning(f"**{name}** 持仓过重，建议减仓 {reduction_pct:.1f}% 以回归最优夏普比率前沿。")
-                                elif opt > curr + 0.05:
-                                    increase_pct = (opt - curr) * 100
-                                    st.info(f"**{name}** 持仓不足，建议增仓 {increase_pct:.1f}% 以回归最优夏普比率前沿。")
-                    
-                    # 绘制资产配置饼图
-                    st.subheader("🥧 资产配置对比")
-                    fig_compare = go.Figure()
-                    
-                    # 当前配置
-                    fig_compare.add_trace(go.Pie(
-                        labels=list(current_weights.keys()),
-                        values=list(current_weights.values()),
-                        name="当前配置",
-                        hole=0.4,
-                        domain=dict(row=0, column=0)
-                    ))
-                    
-                    # 最优配置
-                    fig_compare.add_trace(go.Pie(
-                        labels=list(optimal_weights.keys()),
-                        values=list(optimal_weights.values()),
-                        name="最优配置",
-                        hole=0.4,
-                        domain=dict(row=0, column=1)
-                    ))
-                    
-                    fig_compare.update_layout(
-                        title_text="当前配置 vs 最优配置",
-                        grid=dict(rows=1, columns=2),
-                        height=400
+                    dev_df = pd.DataFrame([{
+                        "资产名称": n,
+                        "当前权重": current_weights.get(n, 0),
+                        "最优权重": optimal_weights.get(n, 0),
+                        "建议调仓": deviations.get(n, 0)
+                    } for n in set(list(current_weights.keys()) + list(optimal_weights.keys()))])
+
+                    st.dataframe(
+                        dev_df.style.format({"当前权重": "{:.1%}", "最优权重": "{:.1%}", "建议调仓": "{:+.1%}"}),
+                        width='stretch',
+                        height=250 # 固定高度
                     )
                     
-                    st.plotly_chart(fig_compare, use_container_width=True)
-                    
+                    st.caption(f"🕒 片段最后更新时间: {datetime.now().strftime('%H:%M:%S')}")
                 else:
-                    st.info("无法计算持仓盈亏，请确保持仓股票在当前分析范围内。")
-            else:
-                st.info("暂无真实持仓记录。请在侧边栏录入交易记录。")
+                    st.warning("行情计算返回空数据，请检查网络或标的代码。")
+
+            # 3. 执行局部刷新片段
+            render_portfolio_fragment_v2()
 
         with t7:
             st.subheader("📈 独立 K 线分析")
             st.caption("独立技术分析模块，手动选择标的并启动K线分析，不影响主程序状态。")
             
-            @st.fragment
             def render_independent_kline(stock_pool):
                 st.subheader("🔍 个股独立技术分析 (手动模式)")
                 
@@ -1146,7 +1160,7 @@ if should_run_analysis and analysis_stocks:
                                                  horizontal=True, key="fit_degree_selector")
                             
                             # 渲染图表并捕获选择事件
-                            event = st.plotly_chart(fig, use_container_width=True, on_select="rerun")
+                            event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", config=PLOTLY_CONFIG)
                             
                             # 如果用户进行了框选
                             if event and "selection" in event and len(event["selection"]["points"]) > 0:
@@ -1179,7 +1193,7 @@ if should_run_analysis and analysis_stocks:
                                     ), row=1, col=1)
                                 
                                 # 重新渲染图表
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
                                 
                                 # 显示拟合结果分析
                                 st.subheader("📈 拟合结果分析")
@@ -1216,6 +1230,7 @@ if should_run_analysis and analysis_stocks:
                                             st.warning(f"支撑线斜率为负 ({v_coeff:.2f})，表明在选区内支撑位呈下降趋势。")
                                 
                                 # 平行通道判定
+                                coeff_diff = 0.0
                                 if peak_line is not None and valley_line is not None:
                                     coeff_diff = abs(p_coeff - v_coeff)
                                     if fit_degree == 2:
@@ -1232,19 +1247,84 @@ if should_run_analysis and analysis_stocks:
                                             st.info("阻力线与支撑线斜率差异明显，表明趋势通道正在扩大或收缩。")
                                 
                                 # 突破判定
+                                latest_close = None
+                                latest_peak = None
                                 if not df_slice.empty and peak_line is not None:
                                     latest_close = df_slice['收盘'].iloc[-1]
                                     latest_peak = peak_line[-1]
                                     if latest_close > latest_peak:
                                         st.success(f"最新收盘价 {latest_close:.2f} 已突破阻力线 {latest_peak:.2f}，可能形成突破信号。")
                                     
-                                    # 二次曲线模式下的额外分析：趋势加速/减速
-                                    if fit_degree == 2 and peak_line is not None:
-                                        if p_coeff > 0:
-                                            st.info("阻力线曲率为正，凹面向上，突破后上涨动能可能加速。")
-                                        elif p_coeff < 0:
-                                            st.warning("阻力线曲率为负，凹面向下，突破后上涨动能可能减速。")
-                            
+                                # 二次曲线模式下的额外分析：趋势加速/减速
+                                if fit_degree == 2 and peak_line is not None:
+                                    if p_coeff > 0:
+                                        st.info("阻力线曲率为正，凹面向上，突破后上涨动能可能加速。")
+                                    elif p_coeff < 0:
+                                        st.warning("阻力线曲率为负，凹面向下，突破后上涨动能可能减速。")
+                                
+                                # AI深度分析
+                                st.subheader("🤖 AI深度分析")
+                                if ds_key:
+                                    if st.button("🔍 启动AI深度分析", type="secondary", key="ai_fit_analysis"):
+                                        with st.spinner("AI正在分析拟合结果，请稍候..."):
+                                            try:
+                                                from openai import OpenAI
+                                                client = OpenAI(api_key=ds_key, base_url="https://api.deepseek.com")
+                                                
+                                                # 构建分析提示词 - 修复格式化字符串错误
+                                                model_type = "二次曲线（加速度）" if fit_degree == 2 else "线性（速度）"
+                                                coeff_unit = "曲率a" if fit_degree == 2 else "斜率k"
+                                                
+                                                # 格式化系数显示
+                                                p_coeff_formatted = f"{p_coeff:.4f}" if fit_degree == 2 else f"{p_coeff:.2f}"
+                                                v_coeff_formatted = f"{v_coeff:.4f}" if fit_degree == 2 else f"{v_coeff:.2f}"
+                                                coeff_diff_formatted = f"{coeff_diff:.4f}" if fit_degree == 2 else f"{coeff_diff:.2f}"
+                                                
+                                                # 突破信号
+                                                if not df_slice.empty and peak_line is not None:
+                                                    breakthrough_status = "已突破阻力线" if latest_close > latest_peak else "未突破阻力线"
+                                                    breakthrough_text = f"最新收盘价{breakthrough_status}"
+                                                else:
+                                                    breakthrough_text = "未检测到突破信号"
+                                                
+                                                analysis_prompt = f"""作为资深金融分析师，请对以下股票技术分析拟合结果进行深度解读：
+                                                
+标的股票：{selected_name}
+拟合模型：{model_type}
+阻力线核心系数：{p_coeff_formatted} ({coeff_unit})
+支撑线核心系数：{v_coeff_formatted} ({coeff_unit})
+系数差异：{coeff_diff_formatted}
+{breakthrough_text}
+选区数据范围：{len(df_slice)}个交易日
+
+请基于以上技术指标，提供：
+1. 技术形态解读（50字内）
+2. 多空动能评估（30字内）
+3. 具体操作建议（20字内）
+4. 风险提示（20字内）"""
+                                                
+                                                response = client.chat.completions.create(
+                                                    model="deepseek-chat",
+                                                    messages=[
+                                                        {"role": "system", "content": "你是资深金融分析师，擅长技术分析，用简洁专业的中文回答。"},
+                                                        {"role": "user", "content": analysis_prompt}
+                                                    ],
+                                                    temperature=0.3,
+                                                    max_tokens=500
+                                                )
+                                                
+                                                ai_analysis = response.choices[0].message.content
+                                                
+                                                # 显示分析结果
+                                                st.success("AI分析完成！")
+                                                st.markdown(f"**🤖 AI分析结果：**")
+                                                st.info(ai_analysis)
+                                                
+                                            except Exception as e:
+                                                st.error(f"AI分析失败：{e}")
+                                else:
+                                    st.warning("⚠️ 如需AI深度分析，请在侧边栏配置DeepSeek API密钥。")
+
                             st.caption(f"提示：当前正在对 {selected_name} 进行技术面独立审计。")
             
             if analysis_stocks:
