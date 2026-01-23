@@ -27,12 +27,8 @@ PLOTLY_CONFIG = {
     'responsive': True         # 自适应容器
 }
 
-# 设置中文字体
-font_name, font_path = setup_chinese_font()
-if font_name:
-    print(f"已使用中文字体: {font_name}")
-else:
-    print("使用默认字体配置")
+# 设置中文字体（静默模式，避免重复打印日志）
+font_name, font_path = setup_chinese_font(silent=True)
 plt.rcParams['axes.unicode_minus'] = False
 
 # 页面配置
@@ -45,7 +41,7 @@ if 'selected_stocks' not in st.session_state or not st.session_state.selected_st
 
 # 获取必要的变量
 analysis_stocks = st.session_state.selected_stocks
-config = load_config()
+config = load_config(silent=True)
 ds_key = config.get("deepseek_api_key", "")
 news_count = config.get("news_count", 5)
 stop_loss_val = st.session_state.user_settings.get('stop_loss', -0.05) if 'user_settings' in st.session_state else -0.05
@@ -126,12 +122,38 @@ def render_independent_kline(stock_pool, jump_target=None):
         st.session_state.ind_kline_select = target_name
         st.session_state.kline_active_flag = True
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        selected_name = st.selectbox("选择分析标的", options=stock_names, key="ind_kline_select")
+    # 获取当前选中的索引
+    current_index = 0
+    if 'ind_kline_select' in st.session_state and st.session_state.ind_kline_select in stock_names:
+        current_index = stock_names.index(st.session_state.ind_kline_select)
+
+    # 前后切换按钮的回调函数
+    def go_prev():
+        idx = stock_names.index(st.session_state.ind_kline_select) if st.session_state.ind_kline_select in stock_names else 0
+        if idx > 0:
+            st.session_state.ind_kline_select = stock_names[idx - 1]
+
+    def go_next():
+        idx = stock_names.index(st.session_state.ind_kline_select) if st.session_state.ind_kline_select in stock_names else 0
+        if idx < len(stock_names) - 1:
+            st.session_state.ind_kline_select = stock_names[idx + 1]
+
+    col_select, col_nav, col_run = st.columns([3, 1, 1])
+    with col_select:
+        selected_name = st.selectbox("选择分析标的", options=stock_names, key="ind_kline_select", label_visibility="collapsed")
         code = [c for c, n in stock_pool.items() if n == selected_name][0]
-    with col2:
-        run_kline = st.checkbox("🚩 启动独立分析引擎", key="kline_active_flag")
+    with col_nav:
+        btn_prev, btn_next = st.columns(2)
+        with btn_prev:
+            st.button("◀", key="btn_prev_stock", on_click=go_prev,
+                      disabled=(current_index == 0),
+                      help="上一个标的", use_container_width=True)
+        with btn_next:
+            st.button("▶", key="btn_next_stock", on_click=go_next,
+                      disabled=(current_index == len(stock_names) - 1),
+                      help="下一个标的", use_container_width=True)
+    with col_run:
+        run_kline = st.checkbox("🚩 启动分析", key="kline_active_flag")
     
     if run_kline:
         with st.spinner(f"正在调取 {selected_name} 全量历史数据..."):
@@ -155,7 +177,10 @@ def render_independent_kline(stock_pool, jump_target=None):
                 ma60 = df['收盘'].rolling(window=60).mean()
                 fig.add_trace(go.Scatter(x=df['日期'], y=ma60, line=dict(color='orange', width=1.5), name='MA60'), row=1, col=1)
                 
-                fig.add_trace(go.Bar(x=df['日期'], y=df['成交量'], marker_color='gray', opacity=0.5, name='Volume'), row=2, col=1)
+                # 根据涨跌设置成交量柱状图颜色：涨红跌绿
+                volume_colors = ['#ff4444' if close >= open_price else '#00cc00'
+                                 for close, open_price in zip(df['收盘'], df['开盘'])]
+                fig.add_trace(go.Bar(x=df['日期'], y=df['成交量'], marker_color=volume_colors, opacity=0.7, name='Volume'), row=2, col=1)
                 
                 fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False, hovermode='x unified')
                 
@@ -168,7 +193,7 @@ def render_independent_kline(stock_pool, jump_target=None):
                                      horizontal=True, key="fit_degree_selector")
                 
                 # 渲染图表并捕获选择事件
-                event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", config=PLOTLY_CONFIG)
+                event = st.plotly_chart(fig, on_select="rerun", config=PLOTLY_CONFIG)
                 
                 # 如果用户进行了框选
                 if event and "selection" in event and len(event["selection"]["points"]) > 0:
@@ -201,7 +226,7 @@ def render_independent_kline(stock_pool, jump_target=None):
                         ), row=1, col=1)
                     
                     # 重新渲染图表
-                    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+                    st.plotly_chart(fig, config=PLOTLY_CONFIG)
                     
                     # 显示拟合结果分析
                     st.subheader("📈 拟合结果分析")

@@ -547,20 +547,38 @@ def search_stock_info(query):
         return []
 
 
-@st.cache_data(ttl=3600)  # 增加到1小时缓存，减少重复请求
+# 线程安全的K线数据缓存（避免在子线程中触发 Streamlit 警告）
+from functools import lru_cache
+import threading
+
+_candle_cache = {}
+_candle_cache_lock = threading.Lock()
+
+
 def fetch_candle_data(code, days=365):
     """
     获取股票的OHLC数据（开盘、最高、最低、收盘、成交量）
-    优化：增加重试机制和更长的缓存时间
+    优化：使用线程安全的缓存，支持并行调用
     Args:
         code: 股票代码
         days: 历史天数，默认365天
     Returns:
         DataFrame，包含日期、开盘、最高、最低、收盘、成交量
     """
+    from datetime import datetime, timedelta
+
+    # 生成缓存键（包含日期，确保每天数据更新）
+    cache_key = f"{code}_{days}_{datetime.now().strftime('%Y%m%d')}"
+
+    # 检查缓存
+    with _candle_cache_lock:
+        if cache_key in _candle_cache:
+            return _candle_cache[cache_key].copy()
+
+    # 缓存未命中，获取数据
     max_retries = 3
     retry_delay = 1  # 秒
-    
+
     for attempt in range(max_retries):
         try:
             import akshare as ak
@@ -595,8 +613,14 @@ def fetch_candle_data(code, days=365):
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             
             df['日期'] = pd.to_datetime(df['日期'])
-            
-            return df[['日期', '开盘', '最高', '最低', '收盘', '成交量']]
+
+            result = df[['日期', '开盘', '最高', '最低', '收盘', '成交量']]
+
+            # 存入缓存
+            with _candle_cache_lock:
+                _candle_cache[cache_key] = result.copy()
+
+            return result
         except Exception as e:
             if attempt < max_retries - 1:
                 print(f"获取 {code} 数据失败，第{attempt+1}次重试: {e}")
@@ -671,18 +695,68 @@ def fetch_latest_prices(codes, names):
         return pd.DataFrame(columns=names)
 
 
+def _process_single_stock(stock_info, weights):
+    """
+    处理单只股票的评分计算（供并行调用）
+
+    Args:
+        stock_info: 元组 (category, code, name)
+        weights: 权重字典
+
+    Returns:
+        结果字典或None（如果处理失败）
+    """
+    category, code, name = stock_info
+
+    try:
+        # 获取最近120天的历史数据（确保有60个交易日）
+        df_candle = fetch_candle_data(code, days=120)
+        if df_candle.empty or len(df_candle) < 60:
+            print(f"股票 {name}({code}) 数据不足，跳过")
+            return None
+
+        # 准备calculate_screening_score所需的DataFrame
+        df = pd.DataFrame({
+            'close': df_candle['收盘'],
+            'volume': df_candle['成交量']
+        })
+
+        # 调用评分函数
+        score_result = calculate_screening_score(df, window=60, weights=weights)
+
+        return {
+            '分类': category,
+            '代码': code,
+            '名称': name,
+            '斜率(k)': score_result.get('k', 0),
+            '归一化斜率(k_rel)': score_result.get('k_rel', 0),
+            'R²': score_result.get('r_squared', 0),
+            '距上轨距离': score_result.get('dist_to_upper', 0),
+            '距离权重': score_result.get('dist_weight', 0),
+            '量能强度': score_result.get('vol_intensity', 0),
+            '量能权重': score_result.get('vol_weight', 0),
+            '综合评分': score_result.get('final_score', 0)
+        }
+    except Exception as e:
+        print(f"处理股票 {name}({code}) 时出错: {e}")
+        return None
+
+
 @st.cache_data(ttl=3600)
-def rank_master_pool(master_pool, weights=None):
+def rank_master_pool(master_pool, weights=None, max_workers=5):
     """
     批量诊断逻辑：遍历master_pool中的所有分类和股票，计算综合评分并排序
-    
+
+    ✅ 优化版本：使用多线程并行获取数据和计算评分，大幅提升处理速度
+
     Args:
         master_pool: 字典，键为分类名称，值为股票代码列表或股票信息字典
                     例如：{'分类1': ['000001', '000002'], '分类2': ['600036']}
                     或者：{'分类1': [{'code': '000001', 'name': '平安银行'}, ...]}
         weights: 权重字典，格式如 {'k': 0.4, 'r2': 0.3, 'dist': 0.2, 'vol': 0.1}
                 默认使用均衡稳健型: k:0.35, r2:0.35, dist:0.20, vol:0.10
-    
+        max_workers: 最大并行线程数，默认5（平衡性能与API限流）
+
     Returns:
         DataFrame，按'综合评分'降序排列，包含以下列：
         - 分类: 股票所属分类
@@ -697,77 +771,59 @@ def rank_master_pool(master_pool, weights=None):
         - 量能权重(vol_weight)
         - 综合评分(final_score)
     """
-    import streamlit as st
-    from datetime import datetime, timedelta
-    
-    results = []
-    
-    # 遍历master_pool中的所有分类
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # 1. 收集所有待处理的股票信息
+    stock_tasks = []
     for category, stocks in master_pool.items():
-        print(f"处理分类: {category}, 共 {len(stocks)} 只股票")
-        
-        # 处理股票列表，可能是字符串代码或字典
         for stock in stocks:
+            # 解析股票信息
+            if isinstance(stock, dict):
+                code = stock.get('code')
+                name = stock.get('name', code)
+            else:
+                code = str(stock)
+                name = code
+
+            if code:
+                stock_tasks.append((category, code, name))
+
+    total_count = len(stock_tasks)
+    print(f"开始并行处理 {total_count} 只股票（{max_workers} 线程）...")
+
+    # 2. 使用线程池并行处理
+    results = []
+    completed_count = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_stock = {
+            executor.submit(_process_single_stock, task, weights): task
+            for task in stock_tasks
+        }
+
+        # 收集结果
+        for future in as_completed(future_to_stock):
+            stock_info = future_to_stock[future]
+            completed_count += 1
+
             try:
-                # 解析股票信息
-                if isinstance(stock, dict):
-                    code = stock.get('code')
-                    name = stock.get('name', code)
-                else:
-                    code = str(stock)
-                    name = code
-                
-                if not code:
-                    continue
-                
-                # 获取最近60个交易日的历史数据
-                # 使用fetch_candle_data获取OHLC数据
-                df_candle = fetch_candle_data(code, days=120)  # 获取120天以确保有60个交易日
-                if df_candle.empty or len(df_candle) < 60:
-                    print(f"股票 {name}({code}) 数据不足，跳过")
-                    continue
-                
-                # 准备calculate_screening_score所需的DataFrame
-                # 需要'close'和'volume'列
-                df = pd.DataFrame({
-                    'close': df_candle['收盘'],
-                    'volume': df_candle['成交量']
-                })
-                
-                # 调用评分函数，传递权重参数
-                score_result = calculate_screening_score(df, window=60, weights=weights)
-                
-                # 添加结果
-                results.append({
-                    '分类': category,
-                    '代码': code,
-                    '名称': name,
-                    '斜率(k)': score_result.get('k', 0),
-                    '归一化斜率(k_rel)': score_result.get('k_rel', 0),
-                    'R²': score_result.get('r_squared', 0),
-                    '距上轨距离': score_result.get('dist_to_upper', 0),
-                    '距离权重': score_result.get('dist_weight', 0),
-                    '量能强度': score_result.get('vol_intensity', 0),
-                    '量能权重': score_result.get('vol_weight', 0),
-                    '综合评分': score_result.get('final_score', 0)
-                })
-                
-                print(f"  股票 {name}({code}) 评分: {score_result.get('final_score', 0):.4f}")
-                
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+                    print(f"[{completed_count}/{total_count}] {stock_info[2]}({stock_info[1]}) 评分: {result['综合评分']:.4f}")
             except Exception as e:
-                print(f"处理股票 {stock} 时出错: {e}")
-                # 继续处理其他股票，不影响全局
-                continue
-    
-    # 如果没有结果，返回空DataFrame
+                print(f"[{completed_count}/{total_count}] {stock_info[2]}({stock_info[1]}) 处理失败: {e}")
+
+    # 3. 如果没有结果，返回空DataFrame
     if not results:
         return pd.DataFrame()
-    
-    # 转换为DataFrame并排序
+
+    # 4. 转换为DataFrame并排序
     result_df = pd.DataFrame(results)
     result_df = result_df.sort_values('综合评分', ascending=False).reset_index(drop=True)
-    
-    print(f"批量诊断完成，共处理 {len(result_df)} 只股票")
+
+    print(f"✅ 并行批量诊断完成，共处理 {len(result_df)} 只股票")
     return result_df
 
 
@@ -1055,7 +1111,7 @@ def show_data_confidence_dashboard():
         if table_data:
             import pandas as pd
             df_table = pd.DataFrame(table_data)
-            st.dataframe(df_table, use_container_width=True, hide_index=True)
+            st.dataframe(df_table, width='stretch', hide_index=True)
         else:
             st.info("暂无审计数据")
     

@@ -589,9 +589,9 @@ def show_data_integrity_ui():
     # 快速操作按钮
     col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 4])
     with col_btn1:
-        select_all = st.button("✅ 全选", use_container_width=True)
+        select_all = st.button("✅ 全选", width='stretch')
     with col_btn2:
-        clear_all = st.button("❌ 清空", use_container_width=True)
+        clear_all = st.button("❌ 清空", width='stretch')
 
     # 初始化multiselect的默认值
     if 'stock_multiselect' not in st.session_state:
@@ -636,10 +636,10 @@ def show_data_integrity_ui():
     col1, col2 = st.columns(2)
     
     with col1:
-        check_button = st.button("🔍 检查数据完整性", type="primary", use_container_width=True)
+        check_button = st.button("🔍 检查数据完整性", type="primary", width='stretch')
     
     with col2:
-        repair_button = st.button("🛠️ 修复缺失数据", type="secondary", use_container_width=True)
+        repair_button = st.button("🛠️ 修复缺失数据", type="secondary", width='stretch')
     
     # 强制更新选项
     force_update = st.checkbox("强制重新下载数据（如果常规修复无效）")
@@ -651,7 +651,7 @@ def show_data_integrity_ui():
             
             # 显示统计表格
             st.subheader("数据统计")
-            st.dataframe(stats_df, use_container_width=True)
+            st.dataframe(stats_df, width='stretch')
             
             # 完整性检查
             integrity_results = check_data_integrity(codes, names)

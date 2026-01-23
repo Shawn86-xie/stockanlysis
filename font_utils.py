@@ -3,11 +3,24 @@ import platform
 import matplotlib.font_manager as fm
 import warnings
 
-def setup_chinese_font():
+# 缓存标记，避免重复执行字体搜索
+_font_setup_done = False
+_cached_font_result = (None, None)
+
+def setup_chinese_font(silent=False):
     """
     自动配置中文字体，优先检测Linux系统路径下的中文字体（如Noto Sans CJK）
     确保图表和界面中的中文字符正常显示
+
+    Args:
+        silent: 是否静默模式（不打印日志）
     """
+    global _font_setup_done, _cached_font_result
+
+    # 如果已经配置过，直接返回缓存结果
+    if _font_setup_done:
+        return _cached_font_result
+
     system = platform.system()
     
     # 字体搜索路径
@@ -69,7 +82,8 @@ def setup_chinese_font():
             font_path = fm.findfont(fm.FontProperties(family=font_name), fallback_to_default=False)
             if font_path and os.path.exists(font_path):
                 available_fonts.append((font_name, font_path))
-                print(f"找到字体: {font_name} - {font_path}")
+                if not silent:
+                    print(f"找到字体: {font_name} - {font_path}")
         except:
             pass
     
@@ -88,7 +102,8 @@ def setup_chinese_font():
                                     font_path = os.path.join(root, file)
                                     font_name = os.path.splitext(file)[0]
                                     available_fonts.append((font_name, font_path))
-                                    print(f"从文件系统找到字体: {font_name} - {font_path}")
+                                    if not silent:
+                                        print(f"从文件系统找到字体: {font_name} - {font_path}")
                                     break
     
     # 配置matplotlib
@@ -106,16 +121,26 @@ def setup_chinese_font():
         import matplotlib.pyplot as plt
         plt.rcParams['font.sans-serif'] = [selected_font_name]
         plt.rcParams['axes.unicode_minus'] = False
-        
-        print(f"已设置中文字体: {selected_font_name}")
+
+        if not silent:
+            print(f"已设置中文字体: {selected_font_name}")
+
+        # 缓存结果
+        _font_setup_done = True
+        _cached_font_result = (selected_font_name, selected_font_path)
         return selected_font_name, selected_font_path
     else:
         # 回退到默认配置
         import matplotlib.pyplot as plt
         plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
         plt.rcParams['axes.unicode_minus'] = False
-        warnings.warn("未找到中文字体，使用默认字体配置。图表中的中文可能显示为方框。")
-        print("警告: 未找到中文字体，使用默认配置")
+        if not silent:
+            warnings.warn("未找到中文字体，使用默认字体配置。图表中的中文可能显示为方框。")
+            print("警告: 未找到中文字体，使用默认配置")
+
+        # 缓存结果
+        _font_setup_done = True
+        _cached_font_result = (None, None)
         return None, None
 
 def check_font_installation():

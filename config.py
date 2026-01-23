@@ -3,36 +3,49 @@ import os
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
+from functools import lru_cache
 
 # 支持 Docker 容器路径 /app 的环境变量配置
 CONFIG_PATH = os.environ.get('CONFIG_PATH', 'config.json')
 BACKUP_DIR = os.path.join(os.path.dirname(CONFIG_PATH), 'backups')
 
-def load_config():
+# 内部缓存标记，避免重复打印日志
+_config_loaded = False
+
+def load_config(silent=False):
     """
     加载配置文件，支持环境变量 CONFIG_PATH 或默认相对路径
     优先从.env文件读取DEEPSEEK_API_KEY，其次从config.json读取
+
+    Args:
+        silent: 是否静默模式（不打印日志）
     """
+    global _config_loaded
+
+    # 如果已加载过，静默返回（避免重复打印）
+    should_print = not silent and not _config_loaded
+
     config_data = {}
-    
+
     # 如果配置文件存在，加载它
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 config_data = json.load(f)
         except Exception as e:
-            print(f"加载配置文件失败: {e}")
+            if should_print:
+                print(f"加载配置文件失败: {e}")
             config_data = {}
-    
+
     # 优先从.env文件读取DEEPSEEK_API_KEY
     api_key_from_env = None
-    
+
     # 方法1: 使用python-dotenv（如果安装）
     try:
         from dotenv import load_dotenv
         load_dotenv()  # 加载.env文件
         api_key_from_env = os.environ.get('DEEPSEEK_API_KEY')
-        if api_key_from_env:
+        if api_key_from_env and should_print:
             print("从.env文件读取DEEPSEEK_API_KEY")
     except ImportError:
         # 如果未安装python-dotenv，尝试手动读取.env文件
@@ -49,22 +62,25 @@ def load_config():
                             os.environ[key] = value
                             if key == 'DEEPSEEK_API_KEY':
                                 api_key_from_env = value
-                if api_key_from_env:
+                if api_key_from_env and should_print:
                     print("从.env文件（手动解析）读取DEEPSEEK_API_KEY")
             except Exception as e:
-                print(f"读取.env文件失败: {e}")
-    
+                if should_print:
+                    print(f"读取.env文件失败: {e}")
+
     # 方法2: 直接从环境变量读取（可能已在容器中设置）
     if not api_key_from_env:
         api_key_from_env = os.environ.get('DEEPSEEK_API_KEY')
-        if api_key_from_env:
+        if api_key_from_env and should_print:
             print("从系统环境变量读取DEEPSEEK_API_KEY")
-    
+
     # 如果从.env或环境变量中找到了API密钥，更新配置数据
     if api_key_from_env:
         config_data['deepseek_api_key'] = api_key_from_env
-        print("已使用.env/environment中的DEEPSEEK_API_KEY覆盖配置")
-    
+        if should_print:
+            print("已使用.env/environment中的DEEPSEEK_API_KEY覆盖配置")
+
+    _config_loaded = True
     return config_data
 
 def cleanup_old_backups(backup_dir, days_to_keep=7):
@@ -214,6 +230,45 @@ def delete_trade(config_data, index):
         del config_data['portfolio'][index]
         save_config(config_data)
     return config_data
+
+
+def update_trade(config_data, index, updates):
+    """
+    根据索引更新portfolio中的交易记录
+
+    Args:
+        config_data: 配置数据
+        index: 交易记录索引
+        updates: 要更新的字段字典，如 {"buy_price": 10.5, "quantity": 2000}
+
+    Returns:
+        更新后的配置数据
+    """
+    if 'portfolio' in config_data and 0 <= index < len(config_data['portfolio']):
+        for key, value in updates.items():
+            if key in config_data['portfolio'][index]:
+                config_data['portfolio'][index][key] = value
+        save_config(config_data)
+    return config_data
+
+
+def find_trade_index(config_data, code):
+    """
+    根据股票代码查找交易记录的索引
+
+    Args:
+        config_data: 配置数据
+        code: 股票代码
+
+    Returns:
+        索引值，如果未找到返回 -1
+    """
+    if 'portfolio' not in config_data:
+        return -1
+    for i, trade in enumerate(config_data['portfolio']):
+        if trade.get('code') == code:
+            return i
+    return -1
 
 def clear_portfolio(config_data):
     """

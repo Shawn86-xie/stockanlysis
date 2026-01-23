@@ -8,7 +8,7 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # 导入自定义模块
-from config import load_config
+from config import load_config, update_trade, find_trade_index, save_config
 from services.data_service import (
     initialize_page_data,
     DataServiceError
@@ -357,20 +357,138 @@ def render_portfolio_fragment_v2():
             return ''
 
         st.subheader("📊 持仓盈亏明细")
-        display_df = summary_df.copy()
-        
-        # 格式化
-        for col in ['成本价', '现价', '成本', '市值']:
-            display_df[col] = display_df[col].map('{:,.2f}'.format)
-        display_df['盈亏比'] = display_df['盈亏比'].map('{:+.2%}'.format)
-        display_df['盈亏额'] = display_df['盈亏额'].map('{:+,.2f}'.format)
 
-        # 【核心优化】使用固定高度 height=400 彻底锁死布局
-        st.dataframe(
-            display_df.style.map(color_profit, subset=['盈亏额', '盈亏比']),
-            width='stretch',
-            height=400 
-        )
+        # 初始化编辑状态
+        if '_editing_stock' not in st.session_state:
+            st.session_state._editing_stock = None
+
+        # 显示表格 + 快捷编辑按钮
+        for idx, row in summary_df.iterrows():
+            stock_code = row['代码']
+            stock_name = row['资产名称'].replace(' 🚫停牌', '')  # 去掉停牌标记
+            cost_price = row['成本价']
+            current_price = row['现价']
+            quantity = row['持仓量']
+            cost = row['成本']
+            market_val = row['市值']
+            profit = row['盈亏额']
+            profit_ratio = row['盈亏比']
+
+            # 盈亏颜色
+            profit_color = "#ff4444" if profit > 0 else "#00cc00"
+
+            # 判断是否正在编辑该股票
+            is_editing = st.session_state._editing_stock == stock_code
+
+            if is_editing:
+                # 编辑模式
+                st.markdown(f"**✏️ 编辑 {stock_name} ({stock_code})**")
+                col_e1, col_e2, col_e3, col_e4 = st.columns([2, 2, 1, 1])
+                with col_e1:
+                    new_cost_price = st.number_input(
+                        "成本价",
+                        value=float(cost_price),
+                        min_value=0.01,
+                        step=0.01,
+                        format="%.2f",
+                        key=f"edit_cost_{stock_code}"
+                    )
+                with col_e2:
+                    new_quantity = st.number_input(
+                        "持仓量",
+                        value=int(quantity),
+                        min_value=1,
+                        step=100,
+                        key=f"edit_qty_{stock_code}"
+                    )
+                with col_e3:
+                    if st.button("💾 保存", key=f"save_{stock_code}", type="primary"):
+                        # 保存更新
+                        cfg = load_config()
+                        trade_idx = find_trade_index(cfg, stock_code)
+                        if trade_idx >= 0:
+                            update_trade(cfg, trade_idx, {
+                                'buy_price': new_cost_price,
+                                'quantity': new_quantity
+                            })
+                            st.session_state._editing_stock = None
+                            # 只清除缓存，不触发网络刷新（行情数据不变，只需重新计算盈亏）
+                            if 'live_portfolio_cache' in st.session_state:
+                                del st.session_state['live_portfolio_cache']
+                            st.success(f"已更新 {stock_name}")
+                            st.rerun()
+                        else:
+                            st.error("未找到该持仓记录")
+                with col_e4:
+                    if st.button("❌ 取消", key=f"cancel_{stock_code}"):
+                        st.session_state._editing_stock = None
+                        st.rerun()
+                st.markdown("---")
+            else:
+                # 显示模式 - 深色背景 + 亮色文字，高对比度
+                if profit > 0:
+                    bg_color = "rgba(255, 68, 68, 0.15)"  # 淡红色背景（盈利）
+                    border_color = "#ff5252"
+                    profit_text_color = "#ff5252"  # 亮红色盈亏文字
+                    status_icon = "📈"
+                elif profit < 0:
+                    bg_color = "rgba(0, 230, 118, 0.15)"  # 淡绿色背景（亏损）
+                    border_color = "#00e676"
+                    profit_text_color = "#00e676"  # 亮绿色盈亏文字
+                    status_icon = "📉"
+                else:
+                    bg_color = "rgba(158, 158, 158, 0.12)"  # 灰色背景（持平）
+                    border_color = "#9e9e9e"
+                    profit_text_color = "#bdbdbd"
+                    status_icon = "➖"
+
+                # 使用容器包装，添加卡片样式
+                with st.container():
+                    st.markdown(f"""
+                    <div style="
+                        background: {bg_color};
+                        border-left: 6px solid {border_color};
+                        border-radius: 10px;
+                        padding: 18px 24px;
+                        margin-bottom: 12px;
+                        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                    ">
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                            <div style="flex: 2; min-width: 140px;">
+                                <div style="font-size: 20px; font-weight: 700; color: #ffffff;">{stock_name}</div>
+                                <div style="font-size: 14px; color: #cccccc; margin-top: 4px;">{stock_code}</div>
+                            </div>
+                            <div style="flex: 1; text-align: center; min-width: 85px;">
+                                <div style="font-size: 12px; color: #aaaaaa; margin-bottom: 6px;">成本价</div>
+                                <div style="font-size: 18px; font-weight: 600; color: #ffffff;">{cost_price:,.2f}</div>
+                            </div>
+                            <div style="flex: 1; text-align: center; min-width: 85px;">
+                                <div style="font-size: 12px; color: #aaaaaa; margin-bottom: 6px;">现价</div>
+                                <div style="font-size: 18px; font-weight: 600; color: #ffffff;">{current_price:,.2f}</div>
+                            </div>
+                            <div style="flex: 1; text-align: center; min-width: 85px;">
+                                <div style="font-size: 12px; color: #aaaaaa; margin-bottom: 6px;">持仓量</div>
+                                <div style="font-size: 18px; font-weight: 600; color: #ffffff;">{int(quantity):,}</div>
+                            </div>
+                            <div style="flex: 1.2; text-align: center; min-width: 100px;">
+                                <div style="font-size: 12px; color: #aaaaaa; margin-bottom: 6px;">市值</div>
+                                <div style="font-size: 18px; font-weight: 600; color: #ffffff;">{market_val:,.2f}</div>
+                            </div>
+                            <div style="flex: 1.8; text-align: right; min-width: 130px; padding-left: 12px; border-left: 1px solid rgba(255,255,255,0.3);">
+                                <div style="font-size: 12px; color: #aaaaaa; margin-bottom: 6px;">盈亏 {status_icon}</div>
+                                <div style="font-size: 26px; font-weight: 700; color: {profit_text_color};">{profit:+,.2f}</div>
+                                <div style="font-size: 18px; font-weight: 600; color: {profit_text_color}; margin-top: 2px;">{profit_ratio:+.2%}</div>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # 编辑按钮放在卡片下方右侧
+                    col_spacer, col_edit = st.columns([14, 1])
+                    with col_edit:
+                        if st.button("✏️", key=f"edit_btn_{stock_code}", help="快捷修改成本价和持仓量"):
+                            st.session_state._editing_stock = stock_code
+                            st.rerun()
 
         # --- 偏离度分析 ---
         st.subheader("⚖️ 配置偏离度分析")
@@ -402,7 +520,7 @@ def render_portfolio_fragment_v2():
                                     color_discrete_sequence=px.colors.qualitative.Set3)
                 fig_current.update_traces(textposition='inside', textinfo='percent+label')
                 fig_current.update_layout(showlegend=True, height=400)
-                st.plotly_chart(fig_current, use_container_width=True, config=PLOTLY_CONFIG)
+                st.plotly_chart(fig_current, config=PLOTLY_CONFIG)
             else:
                 st.info("暂无持仓配置数据")
         
@@ -419,7 +537,7 @@ def render_portfolio_fragment_v2():
                                     color_discrete_sequence=px.colors.qualitative.Set2)
                 fig_optimal.update_traces(textposition='inside', textinfo='percent+label')
                 fig_optimal.update_layout(showlegend=True, height=400)
-                st.plotly_chart(fig_optimal, use_container_width=True, config=PLOTLY_CONFIG)
+                st.plotly_chart(fig_optimal, config=PLOTLY_CONFIG)
             else:
                 st.info("暂无最优配置数据")
         

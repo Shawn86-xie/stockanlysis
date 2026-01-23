@@ -31,7 +31,7 @@ def get_fred_api_key():
         print(f"读取config.json失败: {e}")
         return None
 
-@st.cache_data(ttl=86400)  # EPU为月度数据，缓存24小时即可
+@st.cache_data(ttl=86400 * 7)  # EPU为月度数据，缓存7天
 def fetch_china_epu(api_key=None, use_backup=True):
     """
     抓取中国大陆经济政策不确定性指数 (EPU)
@@ -203,21 +203,22 @@ def fetch_ivix_data():
         df = pd.DataFrame({'date': dates, 'ivix': values})
         return df
 
-@st.cache_data(ttl=3600 * 4)  # 缓存4小时，因为两融数据每日仅更新一次
+@st.cache_data(ttl=3600 * 6)  # 缓存6小时，两融数据每日收盘后更新一次
 def fetch_margin_data():
     """
-    稳健获取全市场两融余额数据并计算真实融资买入占比
-    
-    使用akshare宏接口获取沪深两融数据，结合全市场成交额计算真实占比。
-    
+    稳健获取全市场两融余额数据并计算融资买入占比
+
+    使用akshare宏接口获取沪深两融数据，基于历史数据计算融资买入占比。
+    优化：移除了重量级的stock_zh_a_spot_em调用，改用融资买入额/融资余额比例估算。
+
     Returns:
-        pandas.DataFrame: 包含日期、全市场融资余额、真实融资买入占比、百分位排名等字段的DataFrame。
-                          列：'date' (datetime), 'fin_balance' (float, 亿元), 
+        pandas.DataFrame: 包含日期、全市场融资余额、融资买入占比、百分位排名等字段的DataFrame。
+                          列：'date' (datetime), 'fin_balance' (float, 亿元),
                           'fin_buy_ratio' (float, %), 'percentile' (float)
     """
     # 初始化数据源状态
     data_source = 'unknown'
-    
+
     # 辅助函数：生成模拟数据
     def generate_mock_margin_data():
         print("警告：所有数据源均失败，返回模拟数据")
@@ -230,98 +231,77 @@ def fetch_margin_data():
             'percentile': pd.Series(fin_balance).rank(pct=True).values
         })
         return df
-    
-    # 辅助函数：获取全市场成交额历史数据
-    def get_market_turnover_history():
-        """获取全市场成交额历史数据"""
-        try:
-            # 获取最近30个交易日的全市场成交额
-            # 由于akshare没有直接的历史成交额接口，我们使用模拟数据
-            # 实际应用中可以考虑使用其他数据源
-            dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
-            # 模拟成交额数据：8000-15000亿元之间波动
-            turnover = np.random.uniform(8000, 15000, len(dates))
-            df_turnover = pd.DataFrame({'date': dates, 'total_turnover': turnover})
-            return df_turnover
-        except Exception as e:
-            print(f"获取全市场成交额历史失败: {e}")
-            return None
-    
-    # 方法1: 使用akshare的宏接口获取沪深两融数据并计算真实占比（首选）
+
+    # 辅助函数：基于融资买入额和历史成交额均值计算占比
+    def calculate_fin_buy_ratio(df):
+        """
+        基于融资买入额计算融资买入占比
+        使用历史平均成交额（约1万亿）作为基准，避免调用重量级API
+        """
+        # A股市场近年日均成交额约8000-12000亿，取均值10000亿作为基准
+        ESTIMATED_DAILY_TURNOVER = 10000  # 亿元
+
+        if 'fin_buy_amount_total' in df.columns:
+            # 使用实际融资买入额计算占比
+            df['fin_buy_ratio'] = (df['fin_buy_amount_total'] / ESTIMATED_DAILY_TURNOVER * 100).clip(3, 20)
+        else:
+            # 备用方案：基于融资余额变化估算
+            df['fin_buy_ratio'] = 9.0 + (df['fin_balance'].pct_change() * 100).fillna(0).clip(-3, 3)
+
+        return df
+
+    # 方法1: 使用akshare的宏接口获取沪深两融数据（首选，最快）
     if ak is not None:
         try:
             # 获取沪市两融数据
             margin_sh = ak.macro_china_market_margin_sh()
             # 获取深市两融数据
             margin_sz = ak.macro_china_market_margin_sz()
-            
+
             if not margin_sh.empty and not margin_sz.empty:
                 # 统一列名
                 margin_sh = margin_sh.rename(columns={
-                    '日期': 'date', 
+                    '日期': 'date',
                     '融资余额': 'fin_balance_sh',
                     '融资买入额': 'fin_buy_amount_sh'
                 })
                 margin_sz = margin_sz.rename(columns={
-                    '日期': 'date', 
+                    '日期': 'date',
                     '融资余额': 'fin_balance_sz',
                     '融资买入额': 'fin_buy_amount_sz'
                 })
-                
+
                 # 转换日期格式
                 margin_sh['date'] = pd.to_datetime(margin_sh['date'])
                 margin_sz['date'] = pd.to_datetime(margin_sz['date'])
-                
+
                 # 合并数据
-                df = pd.merge(margin_sh[['date', 'fin_balance_sh', 'fin_buy_amount_sh']], 
-                             margin_sz[['date', 'fin_balance_sz', 'fin_buy_amount_sz']], 
+                df = pd.merge(margin_sh[['date', 'fin_balance_sh', 'fin_buy_amount_sh']],
+                             margin_sz[['date', 'fin_balance_sz', 'fin_buy_amount_sz']],
                              on='date', how='outer')
-                
+
                 # 计算全市场融资余额（单位：亿元）
                 # 注意：原数据单位可能是元，除以1e8转换为亿元
                 df['fin_balance'] = (df['fin_balance_sh'].fillna(0) + df['fin_balance_sz'].fillna(0)) / 1e8
-                
+
                 # 计算全市场融资买入额（单位：亿元）
                 df['fin_buy_amount_total'] = (df['fin_buy_amount_sh'].fillna(0) + df['fin_buy_amount_sz'].fillna(0)) / 1e8
-                
+
                 df = df.sort_values('date')
-                
+
                 # 数据清洗：前向填充缺失值（处理节假日数据不更新问题）
                 df = df.ffill()
-                
+
                 # 计算百分位排名
                 df['percentile'] = df['fin_balance'].rank(pct=True)
-                
-                # 获取全市场成交额数据（获取最新一天的数据）
-                try:
-                    # 获取当前全市场成交额
-                    market_spot = ak.stock_zh_a_spot_em()
-                    if not market_spot.empty and '成交额' in market_spot.columns:
-                        total_turnover = market_spot['成交额'].astype(float).sum() / 1e8  # 转换为亿元
-                        print(f"当前全市场总成交额: {total_turnover:.2f} 亿元")
-                        
-                        # 计算真实融资买入占比（使用最新数据）
-                        if total_turnover > 0:
-                            latest_fin_buy_amount = df['fin_buy_amount_total'].iloc[-1] if len(df) > 0 else 0
-                            real_ratio = (latest_fin_buy_amount / total_turnover) * 100
-                            # 为历史数据分配比例（基于最新比例进行小幅波动）
-                            base_ratio = max(min(real_ratio, 15), 5)  # 限制在5-15%之间
-                            df['fin_buy_ratio'] = np.random.normal(base_ratio, 1, len(df)).clip(5, 15)
-                            # 最新日期使用真实计算值
-                            if len(df) > 0:
-                                df.loc[df.index[-1], 'fin_buy_ratio'] = real_ratio
-                        else:
-                            df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                    else:
-                        df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                except Exception as e:
-                    print(f"获取全市场成交额失败，使用模拟占比: {e}")
-                    df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                
-                print(f"成功通过宏接口获取两融数据并计算真实占比: {len(df)} 条")
+
+                # 使用轻量级方法计算融资买入占比（避免调用stock_zh_a_spot_em）
+                df = calculate_fin_buy_ratio(df)
+
+                print(f"成功通过宏接口获取两融数据: {len(df)} 条")
                 print(f"最新融资买入占比: {df['fin_buy_ratio'].iloc[-1]:.2f}%")
-                data_source = 'akshare_macro_real'
-                
+                data_source = 'akshare_macro'
+
                 # 记录数据源状态到session_state（如果streamlit可用）
                 try:
                     st.session_state['margin_data_source'] = data_source
@@ -329,7 +309,7 @@ def fetch_margin_data():
                     st.session_state['margin_ratio_real'] = True
                 except:
                     pass
-                    
+
                 return df[['date', 'fin_balance', 'fin_buy_ratio', 'percentile']]
         except Exception as e:
             print(f"akshare宏接口尝试失败: {e}")
@@ -339,57 +319,43 @@ def fetch_margin_data():
         try:
             # 获取全市场两融账户信息
             df_margin = ak.stock_margin_account_info()
-            
+
             if df_margin is not None and not df_margin.empty:
                 # 清洗数据
                 df = df_margin[['日期', '融资余额', '融资买入额']].copy()
                 df = df.rename(columns={'日期': 'date', '融资余额': 'fin_balance', '融资买入额': 'fin_buy_amount'})
-                
+
                 # 转换日期格式和数值
                 df['date'] = pd.to_datetime(df['date'])
                 df['fin_balance'] = pd.to_numeric(df['fin_balance'], errors='coerce')
                 df['fin_buy_amount'] = pd.to_numeric(df['fin_buy_amount'], errors='coerce')
-                
+
                 df = df.sort_values('date')
-                
+
                 # 数据清洗：前向填充缺失值
-                df = df.fillna(method='ffill')
-                
+                df = df.ffill()
+
                 # 转换单位：从元转换为亿元
                 df['fin_balance'] = df['fin_balance'] / 1e8
                 df['fin_buy_amount'] = df['fin_buy_amount'] / 1e8
-                
+                df['fin_buy_amount_total'] = df['fin_buy_amount']  # 用于calculate_fin_buy_ratio
+
                 # 计算百分位排名
                 df['percentile'] = df['fin_balance'].rank(pct=True)
-                
-                # 尝试获取全市场成交额计算真实占比
-                try:
-                    market_spot = ak.stock_zh_a_spot_em()
-                    if not market_spot.empty and '成交额' in market_spot.columns:
-                        total_turnover = market_spot['成交额'].astype(float).sum() / 1e8
-                        if total_turnover > 0 and len(df) > 0:
-                            latest_fin_buy_amount = df['fin_buy_amount'].iloc[-1]
-                            real_ratio = (latest_fin_buy_amount / total_turnover) * 100
-                            base_ratio = max(min(real_ratio, 15), 5)
-                            df['fin_buy_ratio'] = np.random.normal(base_ratio, 1, len(df)).clip(5, 15)
-                            df.loc[df.index[-1], 'fin_buy_ratio'] = real_ratio
-                        else:
-                            df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                    else:
-                        df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                except:
-                    df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                
+
+                # 使用轻量级方法计算融资买入占比
+                df = calculate_fin_buy_ratio(df)
+
                 print(f"成功通过account_info接口获取两融数据: {len(df)} 条")
                 data_source = 'akshare_account_info'
-                
+
                 try:
                     st.session_state['margin_data_source'] = data_source
                     st.session_state['margin_data_quality'] = 'real'
                     st.session_state['margin_ratio_real'] = True
                 except:
                     pass
-                    
+
                 return df[['date', 'fin_balance', 'fin_buy_ratio', 'percentile']]
         except Exception as e:
             print(f"akshare account_info接口尝试失败: {e}")
@@ -401,59 +367,44 @@ def fetch_margin_data():
         with open('config.json', 'r', encoding='utf-8') as f:
             config = json.load(f)
         tushare_token = config.get('tushare_token')
-        
+
         if tushare_token:
             import tushare as ts
             ts.set_token(tushare_token)
             pro = ts.pro_api()
-            
+
             # 获取最近90天的两融数据
             end_date = datetime.now().strftime('%Y%m%d')
             start_date = (datetime.now() - timedelta(days=90)).strftime('%Y%m%d')
-            
+
             df = pro.margin(start_date=start_date, end_date=end_date)
-            
+
             if not df.empty:
                 # 按日期汇总融资余额和融资买入额
                 df['date'] = pd.to_datetime(df['trade_date'])
                 df['fin_balance'] = df['rzye'] / 1e8  # 转换为亿元
-                df['fin_buy_amount'] = df['rzmre'] / 1e8  # 融资买入额
-                
+                df['fin_buy_amount_total'] = df['rzmre'] / 1e8  # 融资买入额
+
                 # 数据清洗：前向填充缺失值
-                df = df.fillna(method='ffill')
-                
+                df = df.ffill()
+
                 # 计算百分位排名
                 df['percentile'] = df['fin_balance'].rank(pct=True)
-                
-                # 尝试获取全市场成交额计算真实占比
-                try:
-                    market_spot = ak.stock_zh_a_spot_em()
-                    if not market_spot.empty and '成交额' in market_spot.columns:
-                        total_turnover = market_spot['成交额'].astype(float).sum() / 1e8
-                        if total_turnover > 0 and len(df) > 0:
-                            latest_fin_buy_amount = df['fin_buy_amount'].iloc[-1]
-                            real_ratio = (latest_fin_buy_amount / total_turnover) * 100
-                            base_ratio = max(min(real_ratio, 15), 5)
-                            df['fin_buy_ratio'] = np.random.normal(base_ratio, 1, len(df)).clip(5, 15)
-                            df.loc[df.index[-1], 'fin_buy_ratio'] = real_ratio
-                        else:
-                            df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                    else:
-                        df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                except:
-                    df['fin_buy_ratio'] = np.random.uniform(8, 12, len(df))
-                
+
+                # 使用轻量级方法计算融资买入占比
+                df = calculate_fin_buy_ratio(df)
+
                 df = df.sort_values('date').reset_index(drop=True)
                 print(f"成功通过Tushare Pro获取两融数据，共 {len(df)} 条记录")
                 data_source = 'tushare_pro'
-                
+
                 try:
                     st.session_state['margin_data_source'] = data_source
                     st.session_state['margin_data_quality'] = 'real'
                     st.session_state['margin_ratio_real'] = True
                 except:
                     pass
-                    
+
                 return df[['date', 'fin_balance', 'fin_buy_ratio', 'percentile']]
     except Exception as e:
         print(f"Tushare Pro接口失败: {e}")

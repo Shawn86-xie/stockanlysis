@@ -9,6 +9,14 @@ from datetime import datetime, timedelta
 import time
 import streamlit as st
 
+# 导入本地市场标的库模块
+from services.market_stock_list import (
+    safe_search_local_stock,
+    get_market_stock_list_info,
+    refresh_market_stock_list,
+    init_market_stock_list_if_needed
+)
+
 
 class MarketDataServiceError(Exception):
     """行情数据服务异常"""
@@ -46,34 +54,76 @@ def fetch_stock_data(codes, names):
 def fetch_candle_data(code, days=365):
     """
     获取股票的OHLC数据（开盘、最高、最低、收盘、成交量）
-    
+
+    优化策略（三级缓存）：
+    1. 优先从 session_state 内存缓存读取（最快，毫秒级）
+    2. 其次从本地 Parquet 文件读取（次快，约100ms）
+    3. 最后从网络 API 获取（最慢，约2-3秒）
+
     Args:
         code: 股票代码
         days: 历史天数，默认365天
-    
+
     Returns:
         DataFrame，包含日期、开盘、最高、最低、收盘、成交量
-    
+
     Raises:
         MarketDataServiceError: 当数据获取失败时抛出
     """
+    import os
+    from pathlib import Path
+
+    # === 第一级缓存：session_state 内存缓存 ===
+    cache_key = f'_candle_cache_{code}'
+    if cache_key in st.session_state:
+        # 检查缓存是否过期（5分钟有效期）
+        cache_time_key = f'_candle_cache_time_{code}'
+        if cache_time_key in st.session_state:
+            cache_age = (datetime.now() - st.session_state[cache_time_key]).total_seconds()
+            if cache_age < 300:  # 5分钟内有效
+                return st.session_state[cache_key]
+
+    # === 第二级缓存：本地 Parquet 文件（OHLCV完整数据）===
+    candle_dir = Path("market_data/candle")
+    candle_dir.mkdir(parents=True, exist_ok=True)
+    candle_filepath = candle_dir / f"{code}_ohlcv.parquet"
+
+    if candle_filepath.exists():
+        try:
+            df = pd.read_parquet(candle_filepath)
+            # 检查数据是否需要更新（最后日期是否为今天或昨天）
+            if not df.empty:
+                last_date = pd.to_datetime(df['日期']).max().date()
+                today = datetime.now().date()
+                # 如果最后日期是今天或昨天（或周末时是上周五），使用缓存
+                days_diff = (today - last_date).days
+                is_weekend = datetime.now().weekday() >= 5
+                if days_diff <= 1 or (is_weekend and days_diff <= 3):
+                    # 存入 session_state 缓存
+                    st.session_state[cache_key] = df
+                    st.session_state[f'_candle_cache_time_{code}'] = datetime.now()
+                    return df
+        except Exception as e:
+            print(f"读取本地K线缓存失败: {e}")
+
+    # === 第三级：从网络获取 ===
     max_retries = 3
     retry_delay = 1  # 秒
-    
+
     for attempt in range(max_retries):
         try:
             end_date = datetime.now().strftime("%Y%m%d")
             start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
-            
+
             df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
-            
+
             # 确保返回的是DataFrame且有需要的列
             if not isinstance(df, pd.DataFrame) or df.empty:
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     continue
                 raise MarketDataServiceError(f"获取 {code} 的K线数据失败: 返回空DataFrame")
-            
+
             # 重命名列
             df = df.rename(columns={
                 '日期': '日期',
@@ -83,15 +133,27 @@ def fetch_candle_data(code, days=365):
                 '收盘': '收盘',
                 '成交量': '成交量'
             })
-            
+
             # 确保数据类型正确
             numeric_cols = ['开盘', '最高', '最低', '收盘', '成交量']
             for col in numeric_cols:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-            
+
             df['日期'] = pd.to_datetime(df['日期'])
-            
-            return df[['日期', '开盘', '最高', '最低', '收盘', '成交量']]
+
+            result = df[['日期', '开盘', '最高', '最低', '收盘', '成交量']]
+
+            # 保存到本地 Parquet 缓存
+            try:
+                result.to_parquet(candle_filepath, index=False)
+            except Exception as e:
+                print(f"保存K线缓存失败: {e}")
+
+            # 存入 session_state 缓存
+            st.session_state[cache_key] = result
+            st.session_state[f'_candle_cache_time_{code}'] = datetime.now()
+
+            return result
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(retry_delay)
@@ -249,49 +311,65 @@ def fetch_latest_prices(codes, names, force_network=False):
         raise MarketDataServiceError(f"获取最新价格失败: {e}")
 
 
-def search_stock_info(query):
+def search_stock_info(query, use_local=True, limit=20):
     """
     根据股票代码或名称模糊查询股票信息
-    
+
+    优先使用本地市场标的库进行搜索，提高搜索效率，避免频繁网络请求。
+    如果本地库不存在或use_local=False，则从网络获取。
+
     Args:
         query: 股票代码或名称（支持模糊匹配）
-    
+        use_local: 是否优先使用本地市场库搜索（默认True）
+        limit: 返回结果数量限制
+
     Returns:
         字典列表，每个字典包含股票代码和名称
-    
+
     Raises:
         MarketDataServiceError: 当查询失败时抛出
     """
-    try:
-        # 获取A股股票列表
-        stock_list = ak.stock_info_a_code_name()
-        
-        # 如果查询为空，返回空列表
-        if not query or len(query.strip()) == 0:
+    # 如果查询为空，返回空列表
+    if not query or len(query.strip()) == 0:
+        return []
+
+    query = query.strip()
+
+    # 优先使用本地库搜索
+    if use_local:
+        local_results = safe_search_local_stock(query, limit)
+        if local_results:
+            return local_results
+        # 检查本地库是否存在
+        info = get_market_stock_list_info()
+        if info['exists']:
+            # 本地库存在但没有匹配结果，直接返回空
             return []
-        
-        query = query.strip()
-        
+
+    # 本地库不存在或use_local=False，从网络获取
+    try:
+        stock_list = ak.stock_info_a_code_name()
+
         # 模糊匹配
         results = []
         for _, row in stock_list.iterrows():
             code = str(row['code'])
             name = str(row['name'])
-            
+
             # 匹配代码（精确或部分匹配）
             code_match = query in code
             # 匹配名称（中文模糊匹配）
             name_match = query in name
-            
+
             if code_match or name_match:
                 results.append({
                     'code': code,
                     'name': name
                 })
-                # 限制最多返回10个结果
-                if len(results) >= 10:
+                # 限制返回结果
+                if len(results) >= limit:
                     break
-        
+
         return results
     except Exception as e:
         raise MarketDataServiceError(f"股票信息查询失败: {e}")
@@ -369,6 +447,7 @@ def get_portfolio_summary(portfolio_list, latest_prices):
         total_market_value += market_val
 
         summary_data.append({
+            "代码": code,  # 添加股票代码便于后续编辑
             "资产名称": name + status_mark,  # 停牌标记
             "成本价": trade['buy_price'],
             "现价": current_p,
@@ -463,18 +542,20 @@ def safe_fetch_candle_data(code, days=365):
         return pd.DataFrame()
 
 
-def safe_search_stock_info(query):
+def safe_search_stock_info(query, use_local=True, limit=20):
     """
     安全版本的 search_stock_info，捕获异常并返回空列表
-    
+
     Args:
         query: 股票代码或名称
-    
+        use_local: 是否优先使用本地市场库搜索（默认True）
+        limit: 返回结果数量限制
+
     Returns:
         list: 成功时返回结果列表，失败时返回空列表
     """
     try:
-        return search_stock_info(query)
+        return search_stock_info(query, use_local, limit)
     except MarketDataServiceError:
         return []
 

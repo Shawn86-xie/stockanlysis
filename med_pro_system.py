@@ -558,7 +558,7 @@ if should_run_analysis and analysis_stocks:
                     hovermode="x unified",
                     showlegend=True,
                 )
-                st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+                st.plotly_chart(fig, config=PLOTLY_CONFIG)
             
             render_interactive_plot(cum_returns, stock_names)
             
@@ -699,7 +699,7 @@ if should_run_analysis and analysis_stocks:
                         # 绘制普通回测图表
                         fig = plot_backtest_results(current_price_series, result_df, metrics)
                     
-                    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+                    st.plotly_chart(fig, config=PLOTLY_CONFIG)
                     
                     # 显示背离信号详情
                     if 'divergence_results' in st.session_state and enable_divergence:
@@ -843,7 +843,7 @@ if should_run_analysis and analysis_stocks:
                     
                     # 绘图
                     div_fig = plot_divergence_chart(divergence_df, target_stock)
-                    st.plotly_chart(div_fig, use_container_width=True, config=PLOTLY_CONFIG)
+                    st.plotly_chart(div_fig, config=PLOTLY_CONFIG)
                     
                     # 给出具体的科研判定建议
                     # 检查最近5天是否有信号
@@ -1160,7 +1160,7 @@ if should_run_analysis and analysis_stocks:
                                                  horizontal=True, key="fit_degree_selector")
                             
                             # 渲染图表并捕获选择事件
-                            event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", config=PLOTLY_CONFIG)
+                            event = st.plotly_chart(fig, on_select="rerun", config=PLOTLY_CONFIG)
                             
                             # 如果用户进行了框选
                             if event and "selection" in event and len(event["selection"]["points"]) > 0:
@@ -1193,7 +1193,7 @@ if should_run_analysis and analysis_stocks:
                                     ), row=1, col=1)
                                 
                                 # 重新渲染图表
-                                st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+                                st.plotly_chart(fig, config=PLOTLY_CONFIG)
                                 
                                 # 显示拟合结果分析
                                 st.subheader("📈 拟合结果分析")

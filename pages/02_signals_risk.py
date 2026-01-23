@@ -213,17 +213,57 @@ def render_interactive_plot(cum_returns, stock_names):
         hovermode="x unified",
         showlegend=True,
     )
-    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+    st.plotly_chart(fig, config=PLOTLY_CONFIG)
 
 render_interactive_plot(cum_returns, stock_names)
 
 # 显示最近10个交易日价格数据
 st.subheader("📅 最近10个交易日价格")
 recent_data = get_recent_10_days(data)
-# 仅对数值列应用格式化，避免字符串列格式化错误
+
+# 创建涨跌颜色样式函数
+def color_price_changes(df):
+    """
+    根据价格涨跌为单元格着色
+    红色表示上涨，绿色表示下跌，白色表示持平或无可比数据
+    """
+    # 创建空样式DataFrame
+    styles = pd.DataFrame('', index=df.index, columns=df.columns)
+
+    # 对数值列进行处理
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+
+    for col in numeric_cols:
+        # 获取当前列的价格数据
+        prices = df[col].values
+
+        # 从第二行开始比较（第一行没有前一天数据）
+        for i in range(1, len(prices)):
+            if pd.notna(prices[i]) and pd.notna(prices[i-1]):
+                if prices[i] > prices[i-1]:
+                    # 上涨：红色
+                    styles.iloc[i, df.columns.get_loc(col)] = 'color: #ff4444; font-weight: bold'
+                elif prices[i] < prices[i-1]:
+                    # 下跌：绿色
+                    styles.iloc[i, df.columns.get_loc(col)] = 'color: #00cc66; font-weight: bold'
+                else:
+                    # 持平：白色
+                    styles.iloc[i, df.columns.get_loc(col)] = 'color: #ffffff'
+
+        # 第一行使用白色（没有前一天可比数据）
+        if len(prices) > 0 and pd.notna(prices[0]):
+            styles.iloc[0, df.columns.get_loc(col)] = 'color: #ffffff'
+
+    return styles
+
+# 应用样式并显示
 numeric_cols = recent_data.select_dtypes(include=[np.number]).columns
 if len(numeric_cols) > 0:
-    st.dataframe(recent_data.style.format("{:.2f}", subset=numeric_cols))
+    st.dataframe(
+        recent_data.style
+        .apply(color_price_changes, axis=None)
+        .format("{:.2f}", subset=numeric_cols)
+    )
 else:
     st.dataframe(recent_data)
 
@@ -354,7 +394,7 @@ if len(stock_names) > 0:
             # 绘制普通回测图表
             fig = plot_backtest_results(current_price_series, result_df, metrics)
         
-        st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
+        st.plotly_chart(fig, config=PLOTLY_CONFIG)
         
         # 显示背离信号详情
         if 'divergence_results' in st.session_state and enable_divergence:
@@ -498,7 +538,7 @@ if target_stock and target_stock in data.columns:
         
         # 绘图
         div_fig = plot_divergence_chart(divergence_df, target_stock)
-        st.plotly_chart(div_fig, use_container_width=True, config=PLOTLY_CONFIG)
+        st.plotly_chart(div_fig, config=PLOTLY_CONFIG)
         
         # 给出具体的科研判定建议
         # 检查最近5天是否有信号

@@ -1223,7 +1223,7 @@ def show_data_audit_ui():
         
         if status_data:
             status_df = pd.DataFrame(status_data)
-            st.dataframe(status_df, use_container_width=True, hide_index=True)
+            st.dataframe(status_df, width='stretch', hide_index=True)
     
     # 提供结案按钮
     if st.button("📦 执行盘后结案", type="secondary"):
