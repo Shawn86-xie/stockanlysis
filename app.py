@@ -238,6 +238,27 @@ if st.sidebar.button("📂 加载设置", use_container_width=True):
     else:
         st.sidebar.warning("没有保存的设置")
 
+# 刷新配置按钮（从磁盘重新加载 config.json）
+if st.sidebar.button("🔄 刷新配置", use_container_width=True, help="重新从 config.json 加载配置（修改配置文件后使用）"):
+    # 清除配置缓存
+    if '_config_cache' in st.session_state:
+        del st.session_state._config_cache
+    # 重新加载配置
+    fresh_config = load_config()
+    st.session_state._config_cache = fresh_config
+    st.session_state._config_dirty = False
+
+    # 更新标的库
+    config_master_pool = fresh_config.get('master_pool')
+    if config_master_pool:
+        st.session_state.master_pool = config_master_pool
+
+    # 更新用户设置
+    st.session_state.user_settings = fresh_config.get('user_settings', {})
+
+    st.sidebar.success("✅ 配置已从文件重新加载！")
+    st.rerun()
+
 # 初始化选择状态存储（使用 _sel_ 前缀，与 checkbox key 分开）
 if '_stock_selections' not in st.session_state:
     st.session_state._stock_selections = {}

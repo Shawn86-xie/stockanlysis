@@ -314,23 +314,24 @@ def clear_portfolio(config_data):
         save_config(config_data)
     return config_data
 
-# 测试代码
+# 测试代码（只读模式，不会修改配置文件）
 if __name__ == "__main__":
     print("=== 配置管理模块测试 ===")
-    
+    print("⚠️  警告：此测试模块为只读模式，不会修改配置文件")
+
     # 加载配置
     config = load_config()
     print(f"配置加载成功，keys: {list(config.keys())}")
-    
-    # 测试备份功能
-    if config:
-        print("\n=== 测试备份功能 ===")
-        test_config = config.copy()
-        test_config['test_key'] = 'test_value'
-        save_config(test_config)
-        
-        # 列出备份
-        backups = list_backups()
-        print(f"找到 {len(backups)} 个备份:")
-        for backup in backups[:3]:  # 显示最近3个备份
-            print(f"  - {backup['filename']} ({backup['timestamp'].strftime('%Y-%m-%d %H:%M:%S')})")
+    print(f"CONFIG_PATH: {CONFIG_PATH}")
+    print(f"配置文件是否存在: {os.path.exists(CONFIG_PATH)}")
+
+    # 列出备份（不创建新备份）
+    backups = list_backups()
+    print(f"\n找到 {len(backups)} 个备份:")
+    for backup in backups[:5]:  # 显示最近5个备份
+        print(f"  - {backup['filename']} ({backup['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}, {backup['size']} bytes)")
+
+    # 显示警告
+    print("\n" + "="*50)
+    print("⚠️  如需测试保存功能，请使用专门的测试脚本")
+    print("="*50)

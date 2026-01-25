@@ -316,9 +316,148 @@ MedPortfolio_2026/
 3. **投资决策需结合专业判断**
 4. **系统仅供研究和参考使用**
 
+## 🔧 故障排除
+
+### 常见问题与解决方案
+
+#### 1. 配置文件加载不稳定
+
+**问题描述**：每次启动应用时，有时加载一组参数，有时加载另一组参数，配置不稳定。
+
+**根本原因**：[config.py](config.py#L318-L337) 中的测试代码会在直接运行时覆盖 `config.json` 文件。
+
+**解决方案**：
+- ✅ 已将测试代码改为只读模式，不再修改配置文件
+- ✅ 删除或重命名 `config.json.bak` 文件以避免混淆
+
+**相关文件**：`config.py`（测试代码已安全化）
+
+---
+
+#### 2. AI 资讯页面无法运行
+
+**问题描述**：访问 "AI资讯深度研判" 页面时出现代理相关错误：`__init__() got an unexpected keyword argument 'proxies'`
+
+**根本原因**：
+1. akshare 字段名不匹配（`发布时间` vs `新闻发布时间`）
+2. OpenAI SDK 使用 httpx 而非 requests，代理配置冲突
+3. 批处理错误处理过于严格，一个失败导致全部失败
+
+**解决方案**：
+- ✅ 修正 akshare 字段名映射 ([news_service.py](services/news_service.py#L75-L89))
+- ✅ 彻底禁用代理：
+  - 清除所有代理环境变量
+  - Patch `httpx.Client` 和 `httpx.AsyncClient` ([ai_analyzer.py](ai_analyzer.py#L13-L40))
+  - Patch `requests` 相关类 ([news_service.py](services/news_service.py#L15-L106))
+- ✅ 改进批处理逻辑，部分失败也能返回成功结果 ([news_service.py](services/news_service.py#L131-L137))
+- ✅ 添加 API Key 检查和详细错误提示 ([01_ai_news.py](pages/01_ai_news.py#L113-L139))
+
+**相关文件**：
+- `services/news_service.py`（代理禁用 + 字段名修正）
+- `ai_analyzer.py`（httpx 代理禁用）
+- `pages/01_ai_news.py`（错误处理优化）
+
+---
+
+#### 3. 修改配置文件后不生效
+
+**问题描述**：修改 `config.json` 后，应用仍然使用旧的配置数据。
+
+**根本原因**：应用使用 `session_state._config_cache` 缓存配置，修改文件后不会自动重新加载。
+
+**解决方案**：
+- ✅ 在侧边栏添加 **"🔄 刷新配置"** 按钮 ([app.py](app.py#L241-L257))
+- 使用方法：修改 `config.json` 后，点击此按钮即可重新加载配置，无需重启应用
+
+**相关文件**：`app.py`（新增刷新配置功能）
+
+---
+
+#### 4. 网络请求代理冲突
+
+**问题描述**：在有代理环境的系统中，akshare 和 OpenAI SDK 可能出现代理配置冲突。
+
+**完整解决方案**：
+
+1. **清除环境变量**（在导入库之前）：
+   ```python
+   os.environ.pop('HTTP_PROXY', None)
+   os.environ.pop('HTTPS_PROXY', None)
+   # ... 清除所有代理相关变量
+   ```
+
+2. **Patch httpx**（OpenAI SDK 使用）：
+   ```python
+   def _patched_httpx_client_init(self, *args, **kwargs):
+       kwargs.pop('proxies', None)
+       kwargs.pop('proxy', None)
+       kwargs['trust_env'] = False
+       return _original_httpx_client_init(self, *args, **kwargs)
+   ```
+
+3. **Patch requests**（akshare 使用）：
+   ```python
+   # Patch requests.get, requests.post, Session, HTTPAdapter, PoolManager
+   # 详见 services/news_service.py
+   ```
+
+**技术细节**：
+- OpenAI SDK (v1.3.0) 使用 `httpx` 而非 `requests`
+- httpx 使用 `proxy`（单数）参数，不是 `proxies`（复数）
+- 需要同时 patch 两个库的底层网络层
+
+**相关文件**：
+- `ai_analyzer.py`（httpx patch）
+- `services/news_service.py`（requests patch）
+
+---
+
+### 快速诊断清单
+
+遇到问题时，请按以下顺序检查：
+
+1. **配置文件问题**：
+   - [ ] 检查 `config.json` 是否存在且格式正确
+   - [ ] 确认 `deepseek_api_key` 已配置
+   - [ ] 尝试点击 "🔄 刷新配置" 按钮
+
+2. **网络问题**：
+   - [ ] 检查网络连接
+   - [ ] 确认可以访问 akshare 数据源
+   - [ ] 确认可以访问 DeepSeek API
+
+3. **代理问题**：
+   - [ ] 检查系统是否设置了代理环境变量
+   - [ ] 尝试临时禁用系统代理
+   - [ ] 查看控制台是否有 `proxies` 相关错误
+
+4. **依赖问题**：
+   - [ ] 确认虚拟环境已激活
+   - [ ] 运行 `pip list` 检查依赖版本
+   - [ ] 重新安装依赖：`pip install -r requirements.txt`
+
+5. **数据问题**：
+   - [ ] 检查 `market_data/` 目录权限
+   - [ ] 清理缓存数据重新获取
+   - [ ] 查看数据完整性检查页面
+
+---
+
 ## 🔄 版本信息
 
-### 当前版本：1.3.1
+### 当前版本：1.3.2 (Bug Fix Release)
+
+#### 最新更新 (1.3.2) - 2026年1月25日
+- 🐛 **配置加载稳定性修复**：修复 config.py 测试代码覆盖配置文件的问题
+- 🐛 **AI 资讯页面修复**：
+  - 修复 OpenAI SDK httpx 代理冲突问题
+  - 修正 akshare 新闻字段名映射
+  - 改进批处理错误处理逻辑
+  - 添加 API Key 检查和详细错误提示
+- ✨ **配置刷新功能**：新增侧边栏 "🔄 刷新配置" 按钮，修改配置文件后无需重启
+- 📝 **文档更新**：新增故障排除章节，详细记录常见问题和解决方案
+
+### 历史版本：1.3.1
 
 #### 最新更新 (1.3.1) - 2026年1月23日
 - ✅ **新增形态挖掘工具**：
@@ -430,6 +569,6 @@ MedPortfolio_2026/
 
 **免责声明**：本系统提供的所有分析和建议仅供参考，不构成任何投资建议。使用者应独立判断并承担相应风险。作者不对因使用本系统而产生的任何损失负责。
 
-**最后更新**：2026年1月23日
+**最后更新**：2026年1月25日
 
-**版本状态**：🔧 持续开发中
+**版本状态**：✅ 稳定版本（1.3.2）- Bug Fix Release

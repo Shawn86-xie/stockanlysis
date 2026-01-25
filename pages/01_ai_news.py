@@ -110,19 +110,33 @@ st.info("AI资讯分析需要调用外部API，耗时较长，请手动点击按
 if 'news_results' not in st.session_state:
     st.session_state.news_results = {}
 
+# 检查 API Key 配置
+if not ds_key:
+    st.warning("⚠️ 未配置 DeepSeek API Key，无法进行 AI 分析。请在 config.json 中配置 deepseek_api_key。")
+
 # 按钮触发获取新闻
-if st.button("🔍 获取最新新闻并分析", type="primary"):
+if st.button("🔍 获取最新新闻并分析", type="primary", disabled=not ds_key):
     with st.spinner("正在获取新闻并分析..."):
         try:
             # 调用新闻服务批量获取并分析新闻
             results = batch_fetch_and_analyze(analysis_stocks, news_count, ds_key)
+
             # 将结果存储到 session_state
             for stock_code, result in results.items():
                 st.session_state.news_results[stock_code] = result
+
+            # 显示成功消息
+            if results:
+                st.success(f"✅ 成功获取并分析了 {len(results)} 个股票的新闻")
+            else:
+                st.warning("⚠️ 未获取到任何新闻数据")
+
         except NewsServiceError as e:
             st.error(f"新闻分析服务出错：{e}")
         except Exception as e:
             st.error(f"未知错误：{e}")
+            import traceback
+            st.error(f"详细错误信息：\n{traceback.format_exc()}")
 
 # 显示已存储的结果
 for c, news_entry in st.session_state.news_results.items():

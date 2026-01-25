@@ -1,6 +1,45 @@
-from openai import OpenAI
 from typing import Optional, Dict, Any, List, Tuple
 import json
+import os
+
+# 清除所有代理环境变量（必须在导入 openai 之前）
+os.environ.pop('HTTP_PROXY', None)
+os.environ.pop('HTTPS_PROXY', None)
+os.environ.pop('http_proxy', None)
+os.environ.pop('https_proxy', None)
+os.environ.pop('ALL_PROXY', None)
+os.environ.pop('all_proxy', None)
+
+# Patch httpx 以禁用代理（OpenAI SDK 使用 httpx）
+try:
+    import httpx
+
+    # 保存原始方法
+    _original_httpx_client_init = httpx.Client.__init__
+    _original_httpx_async_client_init = httpx.AsyncClient.__init__
+
+    def _patched_httpx_client_init(self, *args, **kwargs):
+        """移除 httpx.Client 的 proxies/proxy 参数并禁用环境变量"""
+        kwargs.pop('proxies', None)  # 移除可能传入的 proxies
+        kwargs.pop('proxy', None)     # 移除可能传入的 proxy
+        # 设置 trust_env=False 以禁用从环境变量读取代理
+        kwargs['trust_env'] = False
+        return _original_httpx_client_init(self, *args, **kwargs)
+
+    def _patched_httpx_async_client_init(self, *args, **kwargs):
+        """移除 httpx.AsyncClient 的 proxies/proxy 参数并禁用环境变量"""
+        kwargs.pop('proxies', None)
+        kwargs.pop('proxy', None)
+        kwargs['trust_env'] = False
+        return _original_httpx_async_client_init(self, *args, **kwargs)
+
+    # 应用 patches
+    httpx.Client.__init__ = _patched_httpx_client_init
+    httpx.AsyncClient.__init__ = _patched_httpx_async_client_init
+except ImportError:
+    pass  # httpx 未安装，跳过
+
+from openai import OpenAI
 
 def deepseek_analyze(api_key: str, news_title: str, stock_name: str, publish_date: Optional[str] = None) -> Dict[str, Any]:
     """
