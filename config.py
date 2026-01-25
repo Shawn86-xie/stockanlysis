@@ -101,27 +101,62 @@ def cleanup_old_backups(backup_dir, days_to_keep=7):
         except Exception as e:
             print(f"清理备份文件失败 {file_path}: {e}")
 
-def create_backup(config_path):
+# 备份限流：记录上次备份时间
+_last_backup_time = None
+BACKUP_MIN_INTERVAL_SECONDS = 3600  # 最小备份间隔：1小时
+
+def create_backup(config_path, force=False):
     """
-    创建配置文件的备份
+    创建配置文件的备份（带限流机制）
+
+    Args:
+        config_path: 配置文件路径
+        force: 是否强制创建备份（忽略限流）
+
+    Returns:
+        备份文件路径，如果跳过备份则返回 None
     """
+    global _last_backup_time
+
     try:
         # 确保备份目录存在
         os.makedirs(BACKUP_DIR, exist_ok=True)
-        
+
+        # 限流检查：如果距离上次备份不足指定间隔，则跳过
+        if not force and _last_backup_time is not None:
+            elapsed = (datetime.now() - _last_backup_time).total_seconds()
+            if elapsed < BACKUP_MIN_INTERVAL_SECONDS:
+                print(f"备份限流：距上次备份仅 {int(elapsed)} 秒，跳过本次备份（间隔需 {BACKUP_MIN_INTERVAL_SECONDS} 秒）")
+                return None
+
+        # 额外检查：查看备份目录中最近的备份文件时间
+        if not force:
+            existing_backups = sorted(Path(BACKUP_DIR).glob('config_*.json'), reverse=True)
+            if existing_backups:
+                latest_backup = existing_backups[0]
+                latest_time = datetime.fromtimestamp(latest_backup.stat().st_mtime)
+                elapsed = (datetime.now() - latest_time).total_seconds()
+                if elapsed < BACKUP_MIN_INTERVAL_SECONDS:
+                    print(f"备份限流：最近备份 {latest_backup.name} 距今仅 {int(elapsed)} 秒，跳过")
+                    _last_backup_time = latest_time
+                    return None
+
         # 生成带时间戳的备份文件名
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         backup_filename = f"config_{timestamp}.json"
         backup_path = os.path.join(BACKUP_DIR, backup_filename)
-        
+
         # 复制配置文件到备份位置
         if os.path.exists(config_path):
             shutil.copy2(config_path, backup_path)
             print(f"已创建备份: {backup_filename}")
-            
+
+            # 更新上次备份时间
+            _last_backup_time = datetime.now()
+
             # 清理超过7天的旧备份
             cleanup_old_backups(BACKUP_DIR)
-            
+
             return backup_path
         else:
             print("警告: 原始配置文件不存在，跳过备份")

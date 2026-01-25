@@ -7,6 +7,10 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 
+# 认证保护
+from auth import protect_page
+protect_page()
+
 # 导入自定义模块
 from config import load_config
 from services.data_service import (
@@ -164,12 +168,35 @@ else:
         else:
             # 普通文本使用白色，确保在深色背景下可见
             return 'color: #ffffff'
-    
-    # 检查'风险'列是否存在
+
+    # 对当日涨跌列根据涨跌情况着色
+    def highlight_change(val):
+        """
+        根据涨跌情况着色：
+        - 上涨（正数）：红色（中国股市惯例）
+        - 下跌（负数）：绿色
+        - 持平：白色
+        """
+        try:
+            # 解析百分比字符串，如 "1.23%" 或 "-2.45%"
+            val_str = str(val).replace('%', '').strip()
+            num_val = float(val_str)
+            if num_val > 0:
+                return 'color: #ff4444; font-weight: bold'  # 上涨红色
+            elif num_val < 0:
+                return 'color: #00cc66; font-weight: bold'  # 下跌绿色
+            else:
+                return 'color: #ffffff'  # 持平白色
+        except (ValueError, TypeError):
+            return 'color: #ffffff'
+
+    # 应用样式
+    styled_df = sig_df.style
+    if '当日涨跌' in sig_df.columns:
+        styled_df = styled_df.map(highlight_change, subset=['当日涨跌'])
     if '风险' in sig_df.columns:
-        st.table(sig_df.style.map(highlight_risk, subset=['风险']))
-    else:
-        st.table(sig_df)
+        styled_df = styled_df.map(highlight_risk, subset=['风险'])
+    st.table(styled_df)
 
 # 初始化回测参数
 if 'backtest_days' not in st.session_state:
@@ -188,32 +215,95 @@ cum_returns = (1 + returns).cumprod()
 stock_names = list(analysis_stocks.values())
 
 def render_interactive_plot(cum_returns, stock_names):
-    highlighted = st.selectbox(
-        "选择要突出显示的股票（或点击图例隐藏/显示）",
+    """
+    渲染交互式累计收益率曲线图
+    支持两种高亮切换方式：
+    1. 下拉选择器选择
+    2. 点击快捷按钮切换
+    """
+    # 初始化高亮状态
+    if 'chart_highlighted_stock' not in st.session_state:
+        st.session_state.chart_highlighted_stock = stock_names[0] if stock_names else None
+
+    # 确保当前高亮的股票在列表中
+    if st.session_state.chart_highlighted_stock not in stock_names:
+        st.session_state.chart_highlighted_stock = stock_names[0] if stock_names else None
+
+    # 先检查是否有按钮被点击（在渲染下拉框之前）
+    clicked_stock = None
+
+    # 快捷按钮区域 - 点击按钮快速切换高亮
+    st.caption("💡 快捷切换：点击下方按钮快速切换高亮显示")
+
+    # 创建按钮网格，每行5个
+    cols_per_row = 5
+    for i in range(0, len(stock_names), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for j, col in enumerate(cols):
+            idx = i + j
+            if idx < len(stock_names):
+                name = stock_names[idx]
+                # 当前高亮的按钮使用不同样式
+                is_current = (name == st.session_state.chart_highlighted_stock)
+                button_type = "primary" if is_current else "secondary"
+                if col.button(
+                    name,
+                    key=f"quick_select_{idx}",
+                    type=button_type,
+                    use_container_width=True
+                ):
+                    clicked_stock = name
+
+    # 如果有按钮被点击，更新状态并重新运行
+    if clicked_stock and clicked_stock != st.session_state.chart_highlighted_stock:
+        st.session_state.chart_highlighted_stock = clicked_stock
+        st.rerun()
+
+    highlighted = st.session_state.chart_highlighted_stock
+
+    # 下拉选择器（放在按钮后面，避免状态冲突）
+    new_selection = st.selectbox(
+        "或使用下拉菜单选择",
         options=stock_names,
+        index=stock_names.index(highlighted) if highlighted in stock_names else 0,
         key='chart_highlight_select'
     )
-    
+
+    # 如果通过下拉选择器更改了选择
+    if new_selection != highlighted:
+        st.session_state.chart_highlighted_stock = new_selection
+        st.rerun()
+
+    # 构建图表
     fig = go.Figure()
-    for name in cum_returns.columns:
-        line_width = 4 if name == highlighted else 1.5
-        line_opacity = 1.0 if name == highlighted else 0.4
+    columns_list = list(cum_returns.columns)
+
+    for name in columns_list:
+        is_highlighted = (name == highlighted)
+        line_width = 4 if is_highlighted else 1.5
+        line_opacity = 1.0 if is_highlighted else 0.4
+
         fig.add_trace(go.Scatter(
             x=cum_returns.index,
             y=cum_returns[name],
             name=name,
             line=dict(width=line_width),
             opacity=line_opacity,
+            # 高亮的曲线显示在最上层
+            legendrank=0 if is_highlighted else 1,
         ))
-    
+
     fig.update_layout(
         title=f"累积收益率曲线 (当前高亮: {highlighted})",
         xaxis_title="日期",
         yaxis_title="累积收益率",
         hovermode="x unified",
         showlegend=True,
+        height=500,
     )
-    st.plotly_chart(fig, config=PLOTLY_CONFIG)
+
+    # 使用标准 st.plotly_chart 显示图表
+    st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
 render_interactive_plot(cum_returns, stock_names)
 

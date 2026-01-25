@@ -7,6 +7,10 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 
+# 认证保护
+from auth import protect_page
+protect_page()
+
 # 导入自定义模块
 from config import load_config
 from services.data_service import (
@@ -143,7 +147,7 @@ with col_r:
         for name in available_stocks:
             display_df[name] = display_df[name].apply(lambda x: f"{x:.1%}")
         
-        st.dataframe(display_df, width='stretch')
+        st.dataframe(display_df, use_container_width=True)
         st.caption(f"共模拟 {sim_num} 次，展示了夏普比率最高的10个组合")
     
     fig_ef, ax_ef = plt.subplots()

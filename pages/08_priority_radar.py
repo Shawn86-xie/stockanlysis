@@ -4,6 +4,11 @@ import numpy as np
 import json
 import os
 from pathlib import Path
+
+# 认证保护
+from auth import protect_page
+protect_page()
+
 from data_fetcher import rank_master_pool
 from config import load_config
 from ai_analyzer import deepseek_analyze

@@ -9,6 +9,10 @@ import os
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+# 认证保护
+from auth import protect_page
+protect_page()
+
 from data_integrity_checker import show_data_integrity_ui
 
 # 页面配置

@@ -9,10 +9,21 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - CONFIG_PATH=/app/data/config.json
+      # 用户认证配置（请修改为你自己的用户名和密码）
+      - AUTH_USERNAME=shawn
+      - AUTH_PASSWORD=snk2026
+      - AUTH_NAME=管理员
+      - AUTH_COOKIE_KEY=your_random_secret_key_here
+      - AUTH_COOKIE_EXPIRY=7
+      # 开发模式下可设置为true跳过认证
+      # - AUTH_DISABLED=false
     volumes:
-      # 挂载数据目录，用于持久化配置文件和缓存数据
+      # 挂载配置和数据目录
+      - ./config.json:/app/data/config.json
       - ./data:/app/data
-      # 可选：挂载日志目录
+      # 挂载市场数据目录（K线等历史数据）
+      - ./market_data:/app/market_data
+      # 挂载日志目录
       - ./logs:/app/logs
     restart: unless-stopped
     networks:

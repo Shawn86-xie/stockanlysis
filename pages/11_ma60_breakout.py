@@ -13,6 +13,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+
+# 认证保护
+from auth import protect_page
+protect_page()
 import plotly.express as px
 from pathlib import Path
 

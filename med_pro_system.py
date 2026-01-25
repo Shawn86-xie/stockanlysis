@@ -1160,12 +1160,12 @@ if should_run_analysis and analysis_stocks:
                                                  horizontal=True, key="fit_degree_selector")
                             
                             # 渲染图表并捕获选择事件
-                            event = st.plotly_chart(fig, on_select="rerun", config=PLOTLY_CONFIG)
-                            
-                            # 如果用户进行了框选
-                            if event and "selection" in event and len(event["selection"]["points"]) > 0:
+                            event = st.plotly_chart(fig, on_select="rerun", selection_mode=["points", "box", "lasso"], key="kline_chart", config=PLOTLY_CONFIG)
+
+                            # 如果用户进行了框选（使用属性访问方式兼容新版 Streamlit）
+                            if event and hasattr(event, 'selection') and event.selection and len(event.selection.points) > 0:
                                 # 获取选区索引范围
-                                selected_points = event["selection"]["points"]
+                                selected_points = event.selection.points
                                 idx_start = selected_points[0]["point_index"]
                                 idx_end = selected_points[-1]["point_index"]
                                 df_slice = df.iloc[idx_start:idx_end+1]

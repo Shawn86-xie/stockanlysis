@@ -8,9 +8,14 @@ import sys
 import os
 import json
 
-# 添加项目根目录到路径，以便导入macro_fetcher
+# 添加项目根目录到路径
 current_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
 sys.path.insert(0, os.path.abspath(os.path.join(current_dir, '..')))
+
+# 认证保护
+from auth import protect_page
+protect_page()
+
 from macro_fetcher import fetch_china_epu, fetch_ivix_data, fetch_margin_data
 from ai_analyzer import analyze_macro_environment
 

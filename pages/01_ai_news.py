@@ -7,6 +7,10 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 
+# 认证保护
+from auth import protect_page
+protect_page()
+
 # 导入自定义模块
 from config import load_config
 from services.data_service import (

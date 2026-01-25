@@ -28,19 +28,90 @@ from ai_analyzer import deepseek_analyze
 from backtester import generate_signal_series, run_vectorized_backtest, plot_backtest_results, plot_backtest_with_divergence, rsi_grid_search, grid_search_with_backtest, detect_rsi_divergence, plot_divergence_chart, calculate_rsi
 from math_engine import fit_trend_line, detect_peaks_valleys
 from font_utils import setup_chinese_font
+from auth import check_authentication, show_logout_button
 
-# --- 环境与中文字体配置 ---
-# 自动配置中文字体，优先检测Linux系统路径下的中文字体（如Noto Sans CJK）
-font_name, font_path = setup_chinese_font()
-if font_name:
-    print(f"已使用中文字体: {font_name}")
-else:
-    print("使用默认字体配置")
-plt.rcParams['axes.unicode_minus'] = False
+# --- 页面配置（必须在其他st命令之前）---
 st.set_page_config(page_title="主控台", page_icon="🏠", layout="wide")
 
-# --- 加载配置 ---
-config = load_config()
+# --- 环境与中文字体配置（使用缓存，整个容器生命周期只执行一次）---
+@st.cache_resource
+def setup_environment():
+    """
+    初始化环境配置（字体、matplotlib设置等）
+    使用 @st.cache_resource 确保整个容器生命周期内只执行一次
+    """
+    font_name, font_path = setup_chinese_font()
+    if font_name:
+        print(f"[初始化] 已配置中文字体: {font_name}")
+    else:
+        print("[初始化] 使用默认字体配置")
+    plt.rcParams['axes.unicode_minus'] = False
+    return {"font_name": font_name, "font_path": font_path, "initialized": True}
+
+# 调用初始化函数（缓存后只执行一次）
+_env_config = setup_environment()
+
+# --- 初始化锁：确保首次初始化逻辑只运行一次 ---
+if 'initialized' not in st.session_state:
+    st.session_state.initialized = True
+    st.session_state._config_pending_save = False  # 标记配置是否需要保存
+    print("[初始化] 系统首次初始化完成，此后不再重复执行")
+
+# --- 用户认证 ---
+authenticated, user_name, username = check_authentication()
+if not authenticated:
+    st.stop()
+
+# --- 配置管理（使用 session_state 缓存，避免重复 I/O）---
+def get_cached_config():
+    """
+    获取缓存的配置，避免每次 rerun 都读取磁盘
+    只在首次加载或显式刷新时读取文件
+    """
+    if '_config_cache' not in st.session_state:
+        st.session_state._config_cache = load_config()
+        st.session_state._config_dirty = False
+    return st.session_state._config_cache
+
+def safe_save_config(config_data, force=False):
+    """
+    安全保存配置（带限流和变更检测）
+
+    Args:
+        config_data: 要保存的配置数据
+        force: 是否强制保存（忽略限流）
+
+    Returns:
+        bool: 是否实际执行了保存
+    """
+    import time as _time
+
+    # 初始化保存时间记录
+    if '_last_save_time' not in st.session_state:
+        st.session_state._last_save_time = 0
+
+    current_time = _time.time()
+    min_interval = 5  # 最小保存间隔：5秒
+
+    # 限流检查
+    if not force:
+        elapsed = current_time - st.session_state._last_save_time
+        if elapsed < min_interval:
+            return False
+
+    # 执行保存
+    save_config(config_data)
+    st.session_state._last_save_time = current_time
+    st.session_state._config_cache = config_data
+    st.session_state._config_dirty = False
+    return True
+
+def mark_config_dirty():
+    """标记配置已修改，需要保存"""
+    st.session_state._config_dirty = True
+
+# 获取缓存的配置
+config = get_cached_config()
 
 # --- 初始化session_state缓存 ---
 # 使用session_state缓存历史数据，避免重复加载
@@ -94,6 +165,10 @@ if st.session_state.user_settings:
 # --- Streamlit 侧边栏 (精简版) ---
 st.sidebar.title("系统设置")
 
+# 显示当前用户和登出按钮
+st.sidebar.markdown(f"**当前用户:** {user_name}")
+show_logout_button()
+
 # API 密钥设置
 ds_key = st.sidebar.text_input("DeepSeek API 密钥", value=config.get("deepseek_api_key", ""), type="password",
                                help="用于访问DeepSeek API的密钥，获取AI分析的新闻资讯。")
@@ -113,7 +188,10 @@ news_count = st.sidebar.number_input("新闻获取数量", min_value=1, max_valu
 
 st.sidebar.markdown("---")
 
-# 设置保存/加载
+# 设置保存/加载 - 显示待保存提示
+if st.session_state.get('_config_pending_save', False):
+    st.sidebar.warning("⚠️ 有未保存的配置变更")
+
 if st.sidebar.button("💾 保存设置", use_container_width=True):
     selected_codes = []
     for cat, stocks in st.session_state.master_pool.items():
@@ -138,7 +216,8 @@ if st.sidebar.button("💾 保存设置", use_container_width=True):
         config['deepseek_api_key'] = ds_key
     config['user_settings'] = st.session_state.user_settings
     config['news_count'] = news_count
-    save_config(config)
+    safe_save_config(config, force=True)  # 用户显式保存，强制执行
+    st.session_state._config_pending_save = False  # 清除待保存标志
     st.sidebar.success("设置已保存！")
 
 if st.sidebar.button("📂 加载设置", use_container_width=True):
@@ -211,9 +290,9 @@ with main_tab1:
                     else:
                         st.session_state.master_pool[cat_name] = {}
                         # 保存到配置文件
-                        current_config = load_config()
+                        current_config = get_cached_config().copy()
                         current_config['master_pool'] = st.session_state.master_pool
-                        save_config(current_config)
+                        safe_save_config(current_config, force=True)
                         st.success(f"已添加分类 [{cat_name}]")
                         st.rerun()
                 else:
@@ -236,9 +315,9 @@ with main_tab1:
                             # 保留原分类的股票，用新名称创建
                             st.session_state.master_pool[new_name] = st.session_state.master_pool.pop(rename_cat)
                             # 保存到配置文件
-                            current_config = load_config()
+                            current_config = get_cached_config().copy()
                             current_config['master_pool'] = st.session_state.master_pool
-                            save_config(current_config)
+                            safe_save_config(current_config, force=True)
                             st.success(f"已将分类 [{rename_cat}] 修改为 [{new_name}]")
                             st.rerun()
                     else:
@@ -269,9 +348,9 @@ with main_tab1:
                         # 删除原分类
                         del st.session_state.master_pool[del_cat]
                         # 保存到配置文件
-                        current_config = load_config()
+                        current_config = get_cached_config().copy()
                         current_config['master_pool'] = st.session_state.master_pool
-                        save_config(current_config)
+                        safe_save_config(current_config, force=True)
                         st.success(f"已删除分类 [{del_cat}]，{len(stocks_in_cat)} 只股票已移动到 [{target_cat}]")
                         st.rerun()
                 else:
@@ -279,9 +358,9 @@ with main_tab1:
                     if st.button("🗑️ 删除空分类", use_container_width=True, key="btn_del_empty_category"):
                         del st.session_state.master_pool[del_cat]
                         # 保存到配置文件
-                        current_config = load_config()
+                        current_config = get_cached_config().copy()
                         current_config['master_pool'] = st.session_state.master_pool
-                        save_config(current_config)
+                        safe_save_config(current_config, force=True)
                         st.success(f"已删除空分类 [{del_cat}]")
                         st.rerun()
             else:
@@ -417,7 +496,7 @@ with main_tab1:
         for name in selected_names:
             holdings_save[name] = st.session_state.get(f"hold_{name}", 0)
 
-        st.session_state.user_settings = {
+        new_user_settings = {
             'selected_codes': selected_codes,
             'holdings': holdings_save,
             'stop_loss': stop_loss_val,
@@ -425,14 +504,29 @@ with main_tab1:
             'news_count': news_count
         }
 
-        if ds_key:
-            config['deepseek_api_key'] = ds_key
-        config['user_settings'] = st.session_state.user_settings
-        config['news_count'] = news_count
-        save_config(config)
+        # ✅ 优化：将配置变更暂存到 session_state，不在统计时触发文件写入
+        # 这避免了 NAS 环境下因频繁 I/O 导致的页面跳动
+        old_settings = st.session_state.get('user_settings', {})
+        config_changed = (new_user_settings != old_settings or
+                         (ds_key and config.get('deepseek_api_key') != ds_key))
 
+        st.session_state.user_settings = new_user_settings
+
+        # ❌ 不再在统计时保存配置文件
+        # ✅ 改为标记配置待保存，用户可通过"保存设置"按钮手动保存
+        if config_changed:
+            st.session_state._config_pending_save = True
+            # 仅更新内存中的配置缓存，不写入磁盘
+            if ds_key:
+                config['deepseek_api_key'] = ds_key
+            config['user_settings'] = st.session_state.user_settings
+            config['news_count'] = news_count
+            st.session_state._config_cache = config  # 更新内存缓存
+
+        # ✅ 标记统计完成，设置分析标志
         st.session_state.run_analysis = True
         st.session_state.selected_stocks = final_sel.copy()
+        st.session_state.calc_done = True  # 标记统计已完成
         st.rerun()
 
 # ==================== TAB 2: 标的库管理 ====================
@@ -496,9 +590,9 @@ with main_tab2:
                             else:
                                 st.session_state.master_pool[quick_category][selected_code] = selected_name
                                 # 自动保存到配置文件
-                                current_config = load_config()
+                                current_config = get_cached_config().copy()
                                 current_config['master_pool'] = st.session_state.master_pool
-                                save_config(current_config)
+                                safe_save_config(current_config, force=True)
                                 st.success(f"已添加 {selected_name} 并保存到配置")
                                 st.rerun()
             else:
@@ -524,9 +618,9 @@ with main_tab2:
                 else:
                     st.session_state.master_pool[new_category][new_code] = new_name
                     # 自动保存到配置文件
-                    current_config = load_config()
+                    current_config = get_cached_config().copy()
                     current_config['master_pool'] = st.session_state.master_pool
-                    save_config(current_config)
+                    safe_save_config(current_config, force=True)
                     st.success(f"已添加 {new_name}({new_code}) 并保存到配置")
                     st.rerun()
             else:
@@ -570,9 +664,9 @@ with main_tab2:
                                     if not st.session_state.master_pool[cat]:
                                         del st.session_state.master_pool[cat]
                                     # 保存配置
-                                    current_config = load_config()
+                                    current_config = get_cached_config().copy()
                                     current_config['master_pool'] = st.session_state.master_pool
-                                    save_config(current_config)
+                                    safe_save_config(current_config, force=True)
                                     st.session_state._moving_stock = None
                                     st.rerun()
                             with col_cancel:
@@ -599,17 +693,17 @@ with main_tab2:
                                 if not st.session_state.master_pool[cat]:
                                     del st.session_state.master_pool[cat]
                                 # 自动保存到配置文件
-                                current_config = load_config()
+                                current_config = get_cached_config().copy()
                                 current_config['master_pool'] = st.session_state.master_pool
-                                save_config(current_config)
+                                safe_save_config(current_config, force=True)
                                 st.rerun()
 
         st.markdown("---")
         if st.button("保存标的库到配置", type="primary", use_container_width=True):
-            # 重新加载最新配置，避免覆盖其他配置项
-            current_config = load_config()
+            # 使用缓存的配置，避免重复读取
+            current_config = get_cached_config().copy()
             current_config['master_pool'] = st.session_state.master_pool
-            save_config(current_config)
+            safe_save_config(current_config, force=True)
             st.success("标的库已保存！")
 
 # ==================== TAB 3: 交易录入 ====================
@@ -651,8 +745,10 @@ with main_tab3:
                             "buy_date": buy_date.strftime("%Y-%m-%d"),
                             "timestamp": int(datetime.now().timestamp())
                         }
-                        config = load_config()
+                        config = get_cached_config().copy()
                         config = save_trade(config, trade_data)
+                        # 更新缓存
+                        st.session_state._config_cache = config
                         st.success("交易记录已保存！")
                         st.rerun()
                     else:
@@ -662,7 +758,7 @@ with main_tab3:
 
     with col_list:
         st.subheader("当前持仓记录")
-        config = load_config()
+        config = get_cached_config()
         portfolio = config.get('portfolio', [])
 
         # 初始化编辑状态
@@ -701,7 +797,7 @@ with main_tab3:
                             # 更新持仓记录
                             config['portfolio'][idx]['buy_price'] = float(edit_price)
                             config['portfolio'][idx]['quantity'] = int(edit_qty)
-                            save_config(config)
+                            safe_save_config(config, force=True)
                             st.session_state.editing_trade_idx = None
                             st.rerun()
                     with col_cancel:
